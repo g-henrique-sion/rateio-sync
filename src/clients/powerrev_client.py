@@ -1098,4 +1098,9 @@ def build_invoice_index_for_ucs(
         details_failed,
         details_cached,
     )
+    if details_failed:
+        raise RuntimeError(
+            f"PowerRev: mes {month} ficou com {details_failed} detalhes de fatura "
+            "nao recuperados; full sync cancelado para preservar os saldos."
+        )
     return result

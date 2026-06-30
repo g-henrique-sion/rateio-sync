@@ -98,7 +98,7 @@ _MAX_CONSECUTIVE_ERRORS = 5
 _ERROR_BACKOFF_BASE = 30
 _ERROR_BACKOFF_MAX = 300
 _SHEETS_STEP_MAX_RETRIES = 5
-_SHEETS_STEP_BACKOFF_BASE = 5
+_SHEETS_STEP_BACKOFF_BASE = 15
 
 _known_task_ids: set[str] = set()
 _LOW_PRIORITY_DUPLICATE_STATUSES = {
@@ -944,19 +944,11 @@ def _load_generation_projection_goal_by_month(
         raise ValueError(f"Favorecido sem colunas de geração configuradas: {favorecido!r}")
     projected_col_index, _consolidated_col_index = total_columns
 
-    try:
-        ws = _get_worksheet_with_aliases(
-            spreadsheet_id,
-            RATEIO_GENERATION_SHEET_TAB,
-            ("Geracao Total",),
-        )
-    except Exception as exc:
-        logger.warning(
-            "Nao foi possivel abrir aba de geracao total na planilha %s: %s",
-            spreadsheet_id,
-            exc,
-        )
-        return {}
+    ws = _get_worksheet_with_aliases(
+        spreadsheet_id,
+        RATEIO_GENERATION_SHEET_TAB,
+        ("Geracao Total",),
+    )
 
     rows = read_all_rows(ws, spreadsheet_id=spreadsheet_id)
     goals: dict[str, Decimal] = {}
@@ -970,12 +962,16 @@ def _load_generation_projection_goal_by_month(
             if len(row) > _GENERATION_TOTAL_MONTH_COL_INDEX
             else ""
         )
-        goal = _to_decimal(
-            row[projected_col_index]
-            if len(row) > projected_col_index
-            else ""
-        )
-        if not month_ref or goal is None:
+        raw_goal = row[projected_col_index] if len(row) > projected_col_index else ""
+        goal = _to_decimal(raw_goal)
+        if not month_ref:
+            invalid += 1
+            continue
+        # A sincronizacao de Geracao Total representa ausencia de geracao
+        # como celula vazia. Como a leitura foi bem-sucedida, esse caso e zero real.
+        if goal is None and not str(raw_goal if raw_goal is not None else "").strip():
+            goal = Decimal("0")
+        if goal is None:
             invalid += 1
             continue
         goals[month_ref] = goal
@@ -988,6 +984,53 @@ def _load_generation_projection_goal_by_month(
         invalid,
     )
     return goals
+
+
+def _validate_generation_goals(
+    goals: dict[str, Decimal],
+    required_months: set[str],
+    *,
+    sheet_label: str,
+) -> None:
+    missing = sorted(
+        month for month in required_months if month not in goals
+    )
+    if missing:
+        raise RuntimeError(
+            f"Rateio '{sheet_label}' sem metas de geracao validadas para: "
+            + ", ".join(missing)
+        )
+
+
+def _required_goal_months_for_rows(
+    rows: list[list],
+    frozen_rateio_months: set[str] | None = None,
+) -> set[str]:
+    required: set[str] = set()
+    for row in rows:
+        rateio_month = _normalize_month_reference_any(row[0] if row else "")
+        if not rateio_month or _is_rateio_month_frozen(
+            rateio_month,
+            frozen_rateio_months,
+        ):
+            continue
+        required.add(rateio_month)
+    return required
+
+
+def _required_goal_months_for_reference_months(
+    months: set[str],
+    frozen_rateio_months: set[str] | None = None,
+) -> set[str]:
+    required: set[str] = set()
+    for month_ref in months:
+        month_int = _month_ref_to_int(month_ref)
+        if month_int is None:
+            continue
+        rateio_month = format_reference_month(_add_months(month_int, 1))
+        if not _is_rateio_month_frozen(rateio_month, frozen_rateio_months):
+            required.add(rateio_month)
+    return required
 
 
 def _apply_k_l_m_targets(
@@ -1039,16 +1082,10 @@ def _apply_k_l_m_targets(
         reference_label = ",".join(reference_months)
         goal = goals.get(rateio_month)
         if goal is None:
-            logger.warning(
-                (
-                    "Rateio '%s' alteracao %s (referencia %s) sem meta de geracao. "
-                    "Aplicando coeficiente 0 para nao contingencia."
-                ),
-                sheet_label,
-                rateio_month,
-                reference_label,
+            raise RuntimeError(
+                f"Rateio '{sheet_label}' alteracao {rateio_month} "
+                f"(referencia {reference_label}) sem meta de geracao validada."
             )
-            goal = Decimal("0")
 
         fixed_rows: list[dict] = []
         adjustable_rows: list[dict] = []
@@ -3211,6 +3248,8 @@ def _get_worksheet_with_aliases(
                 spreadsheet_id=spreadsheet_id,
                 create_if_missing=False,
             )
+        except requests.RequestException:
+            raise
         except Exception as exc:
             last_exc = exc
             continue
@@ -3230,7 +3269,7 @@ def _run_sheets_step_with_retry(step_label: str, fn: Callable[[], _T]) -> _T:
             attempt += 1
             if attempt >= _SHEETS_STEP_MAX_RETRIES:
                 raise
-            wait_s = _SHEETS_STEP_BACKOFF_BASE * attempt
+            wait_s = _SHEETS_STEP_BACKOFF_BASE * (2 ** (attempt - 1))
             logger.warning(
                 (
                     "Sheets timeout/erro de rede em '%s' (tentativa %d/%d): %s. "
@@ -3931,6 +3970,32 @@ def full_sync() -> None:
             lambda sid=spreadsheet_id: _load_frozen_rateio_months(sid),
         )
 
+    # Preflight: valida todas as metas antes de escrever qualquer aba de rateio.
+    goals_by_target: dict[tuple[str, str], dict[str, Decimal]] = {}
+    for target in _RATEIO_TARGETS:
+        distributor, favorecido = target
+        spreadsheet_id, _target_tab_name = resolve_rateio_sheet_target(
+            distributor,
+            favorecido,
+        )
+        target_label = f"{distributor} / {favorecido}"
+        goals = _run_sheets_step_with_retry(
+            f"Preflight metas geracao [{target_label}]",
+            lambda sid=spreadsheet_id, fav=favorecido: _load_generation_projection_goal_by_month(
+                sid,
+                fav,
+            ),
+        )
+        _validate_generation_goals(
+            goals,
+            _required_goal_months_for_rows(
+                rows_by_target[target],
+                frozen_months_by_distributor[distributor],
+            ),
+            sheet_label=target_label,
+        )
+        goals_by_target[target] = goals
+
     # 3. Escrever cada aba de Favorecido de forma isolada.
     for target in _RATEIO_TARGETS:
         distributor, favorecido = target
@@ -3969,13 +4034,7 @@ def full_sync() -> None:
             f"Rateio [{target_label}]",
             _write_rateio_tab,
         )
-        goals = _run_sheets_step_with_retry(
-            f"Metas geracao [{target_label}]",
-            lambda sid=spreadsheet_id, fav=favorecido: _load_generation_projection_goal_by_month(
-                sid,
-                fav,
-            ),
-        )
+        goals = goals_by_target[target]
         target_last_rateio_index = _last_rateio_index_for_distributor(
             distributor,
             {},
@@ -4260,14 +4319,22 @@ def delta_sync(last_updated_ts: int) -> int:
                     current_month=current_month,
                     frozen_rateio_months=frozen_months_by_distributor[distributor],
                 )
-            update_rows_in_place(ws, updates, col_count=_RATEIO_WRITE_COL_COUNT)
             goals = _run_sheets_step_with_retry(
-                f"Metas geracao delta [{target_label}]",
+                f"Preflight metas geracao delta [{target_label}]",
                 lambda sid=ws.spreadsheet_id, fav=favorecido: _load_generation_projection_goal_by_month(
                     sid,
                     fav,
                 ),
             )
+            _validate_generation_goals(
+                goals,
+                _required_goal_months_for_reference_months(
+                    impacted_months_by_target[target],
+                    frozen_months_by_distributor[distributor],
+                ),
+                sheet_label=target_label,
+            )
+            update_rows_in_place(ws, updates, col_count=_RATEIO_WRITE_COL_COUNT)
             target_last_rateio_index = _last_rateio_index_for_distributor(
                 distributor,
                 {},
@@ -4417,35 +4484,52 @@ def _interruptible_sleep(seconds: float) -> None:
         time.sleep(min(1.0, end - time.time()))
 
 
+def _run_full_sync_until_success(reason: str) -> bool:
+    attempt = 0
+    while not _shutdown_requested:
+        attempt += 1
+        try:
+            full_sync()
+            return True
+        except MemoryError:
+            logger.exception(
+                "MemoryError no full sync %s (tentativa %d).",
+                reason,
+                attempt,
+            )
+        except Exception:
+            logger.exception(
+                "Full sync %s cancelado (tentativa %d); nenhuma execucao parcial "
+                "sera aceita.",
+                reason,
+                attempt,
+            )
+
+        _reset_all_sessions(f"full sync {reason} incompleto")
+        backoff = min(
+            _ERROR_BACKOFF_BASE * (2 ** min(attempt - 1, 4)),
+            _ERROR_BACKOFF_MAX,
+        )
+        logger.warning(
+            "Full sync %s sera reiniciado integralmente em %ds.",
+            reason,
+            backoff,
+        )
+        _interruptible_sleep(backoff)
+
+    return False
+
+
 def main() -> None:
     global _shutdown_requested
 
     logger.info("Rateio Sync iniciando (PID %d)...", os.getpid())
     log_memory("Boot")
 
-    # Full sync inicial
-    initial_ok = False
-    for attempt in range(3):
-        if _shutdown_requested:
-            logger.info("Shutdown antes do full sync inicial.")
-            return
-        try:
-            full_sync()
-            initial_ok = True
-            break
-        except MemoryError:
-            logger.critical("MemoryError no full sync inicial (tentativa %d/3)!", attempt + 1)
-            force_free_memory()
-            _reset_all_sessions("MemoryError")
-            time.sleep(30)
-        except Exception:
-            logger.exception("Erro no full sync inicial (tentativa %d/3).", attempt + 1)
-            if attempt < 2:
-                _reset_all_sessions("erro inicial")
-            time.sleep(30)
-
-    if not initial_ok:
-        logger.error("Full sync inicial falhou 3x - entrando no loop mesmo assim.")
+    # Nenhum delta e iniciado antes de um full sync integralmente valido.
+    if not _run_full_sync_until_success("inicial"):
+        logger.info("Shutdown antes da conclusao do full sync inicial.")
+        return
 
     last_full = time.time()
     last_delta_ts = int(time.time() * 1000)
@@ -4473,7 +4557,8 @@ def main() -> None:
                 )
 
             if now - last_full >= FULL_SYNC_INTERVAL_S:
-                full_sync()
+                if not _run_full_sync_until_success("programado"):
+                    break
                 last_full = time.time()
                 last_delta_ts = int(time.time() * 1000)
             else:

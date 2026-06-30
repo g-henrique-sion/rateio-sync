@@ -119,10 +119,9 @@ def resolve_rateio_sheet_target(
 
 
 # Sync timings
-FULL_SYNC_INTERVAL_S = int(os.getenv("FULL_SYNC_INTERVAL_S", "3600"))  # 2 h
+FULL_SYNC_INTERVAL_S = max(86400, int(os.getenv("FULL_SYNC_INTERVAL_S", "86400")))  # 24 h minimum
 DELTA_SYNC_INTERVAL_S = int(os.getenv("DELTA_SYNC_INTERVAL_S", "600"))  # 10 min
 
 # Sheets write tuning
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "300"))
 CHUNK_PAUSE_S = float(os.getenv("CHUNK_PAUSE_S", "2"))
-
