@@ -998,10 +998,9 @@ def build_invoice_index_for_ucs(
     unresolved_ids = list(dict.fromkeys(unresolved_ids))
 
     if unresolved_ids:
-        if _USE_BATCH_EXPORT:
-            fallback_limit = min(len(unresolved_ids), _BATCH_EXPORT_FALLBACK_MAX_IDS)
-        else:
-            fallback_limit = len(unresolved_ids)
+        # Dados de saldo e emissao sao obrigatorios. O fallback cobre tudo
+        # que o batch-export nao devolveu, independentemente do ambiente.
+        fallback_limit = len(unresolved_ids)
 
         if fallback_limit > 0:
             fallback_ids = unresolved_ids[:fallback_limit]
