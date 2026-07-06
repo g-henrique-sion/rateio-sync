@@ -58,6 +58,7 @@ from src.clients.sheets_manager import (
     reset_client as reset_sheets_client,
 )
 from src.core.row_builder import (
+    _resolve_dropdown_value,
     slim_task,
     build_row,
     extract_task_uc,
@@ -129,7 +130,13 @@ _RATEIO_COPEL_HISTORY_TAB = os.getenv(
     "RATEIO_COPEL_HISTORY_TAB",
     _RATEIO_HISTORY_TAB,
 ).strip() or _RATEIO_HISTORY_TAB
-_FORMULARIO_COPEL_TAB = "Formulário COPEL"
+_FORMULARIO_TABS_BY_DISTRIBUTOR = {
+    "COPEL": "Formul\u00e1rio COPEL",
+    "AmE": "Formul\u00e1rio AmE",
+    "CELESC": "Formul\u00e1rio CELESC",
+    "Energisa MS": "Formul\u00e1rio Energisa MS",
+}
+_FORMULARIO_COPEL_TAB = _FORMULARIO_TABS_BY_DISTRIBUTOR["COPEL"]
 _FORMULARIO_COPEL_WRITE_COL_COUNT = 8  # A:H
 _FORMULARIO_COPEL_PROJECT_LIST_IDS = (
     "901304117744",
@@ -137,6 +144,30 @@ _FORMULARIO_COPEL_PROJECT_LIST_IDS = (
 )
 _FORMULARIO_COPEL_CPF_CNPJ_CF_ID = "6bcbff0f-3228-44e1-b7d7-14efa915fc31"
 _FORMULARIO_COPEL_COL_H_CF_ID = "cd8687a7-0393-45b9-8292-f9b878b31512"
+_FORMULARIO_RAZAO_SOCIAL_CF_ID = "dfb0de9b-121a-4bf6-977f-dfb5eec523cb"
+_FORMULARIO_UC_ANEEL_HEADER = "UC Aneel"
+_FORMULARIO_ADDRESS_CF_IDS = {
+    "rua": "26d33756-428f-4f28-a1b4-485cb875429e",
+    "numero": "6348124b-60d4-40d5-80fe-86019c173d4e",
+    "complemento": "6257313d-18da-4ebb-aa03-d07846b5da8d",
+    "bairro": "a9ce9f60-cf2b-4eb8-975c-2fe8c7c27591",
+    "cidade": "81ba9425-6386-40ea-8a92-e270e8284bd7",
+    "estado": "06361a45-790b-4fbe-9e66-427cfb28e7ec",
+    "cep": "f24d971c-4037-41a7-a1f1-f92c84569993",
+}
+_FORMULARIO_ADDRESS_HEADER = "Endere\u00e7o"
+_FORMULARIO_RATEIO_HEADER_ALIASES = {
+    "usina": {"USINA"},
+    "razao_social": {"RAZAO SOCIAL"},
+    "uc": {"UC"},
+    "nova_uc": {"NOVA UC", "UC ANEEL"},
+    "percentual": {"%", "PERCENTUAL", "PORCENTAGEM"},
+    "alteracao": {
+        "ALTERACAO PARA MES",
+        "ALTERACAO PARA O MES",
+        "ALTERACAO RATEIO PARA O MES",
+    },
+}
 _RATEIO_WRITE_COL_COUNT = 16  # A:P
 _INVOICE_ISSUE_DAY_OUTPUT_COL_INDEX = 13  # N
 _INVOICE_ISSUE_DAY_HEADER = "Dia de emiss\u00e3o da fatura da distribuidora"
@@ -3004,7 +3035,7 @@ def _clickup_custom_field_to_text(task: dict, field_id: str) -> str:
                 elif item not in (None, ""):
                     parts.append(str(item).strip())
             return ", ".join(part for part in parts if part)
-        return str(value).strip()
+        return _resolve_dropdown_value(field_id, value, field).strip()
     return ""
 
 
@@ -3020,6 +3051,8 @@ def _slim_task_with_formulario_copel_fields(task: dict) -> dict:
         if field_id in {
             _FORMULARIO_COPEL_CPF_CNPJ_CF_ID,
             _FORMULARIO_COPEL_COL_H_CF_ID,
+            _FORMULARIO_RAZAO_SOCIAL_CF_ID,
+            *_FORMULARIO_ADDRESS_CF_IDS.values(),
         } and field_id not in existing_cf_ids:
             extra_fields.append(field)
 
@@ -3080,13 +3113,61 @@ def _build_formulario_copel_cpf_cnpj_by_uc(tasks: list[dict]) -> dict[str, str]:
     )
 
 
-def _build_formulario_copel_uc_by_project_name(tasks: list[dict]) -> dict[str, str]:
-    selected: dict[str, tuple[int, str]] = {}
+def _build_formulario_address(task: dict) -> str:
+    values = {
+        field: re.sub(
+            r"\s+",
+            " ",
+            _clickup_custom_field_to_text(task, field_id),
+        ).strip()
+        for field, field_id in _FORMULARIO_ADDRESS_CF_IDS.items()
+    }
+
+    address = ", ".join(
+        value
+        for value in (
+            values["rua"],
+            values["numero"],
+            values["complemento"],
+        )
+        if value
+    )
+    city_state = "-".join(
+        value
+        for value in (values["cidade"], values["estado"])
+        if value
+    )
+    if city_state:
+        location = " - ".join(
+            value for value in (values["bairro"], city_state) if value
+        )
+        address = f"{address} - {location}" if address else location
+    elif values["bairro"]:
+        address = f"{address} - {values['bairro']}" if address else values["bairro"]
+    if values["cep"]:
+        address = f"{address} {values['cep']}" if address else values["cep"]
+    return address
+
+
+def _build_formulario_address_by_uc(tasks: list[dict]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for task in sorted(_prioritize_tasks_by_uc(tasks), key=_task_priority_key):
+        uc_key = _normalize_uc_key(extract_task_uc(task))
+        if uc_key:
+            result[uc_key] = _build_formulario_address(task)
+    return result
+
+
+def _build_formulario_project_values_by_project_name(
+    tasks: list[dict],
+) -> dict[str, tuple[str, str]]:
+    selected: dict[str, tuple[int, str, str]] = {}
 
     for task in tasks:
         project_key = _formulario_copel_project_key(task.get("name", ""))
         uc = extract_task_uc(task)
-        if not project_key or not uc:
+        uc_aneel = extract_task_uc_aneel(task)
+        if not project_key or (not uc and not uc_aneel):
             continue
         try:
             updated = int(str(task.get("date_updated") or "0"))
@@ -3095,9 +3176,26 @@ def _build_formulario_copel_uc_by_project_name(tasks: list[dict]) -> dict[str, s
 
         current = selected.get(project_key)
         if current is None or updated > current[0]:
-            selected[project_key] = (updated, uc)
+            selected[project_key] = (updated, uc, uc_aneel)
 
-    return {project_key: uc for project_key, (_updated, uc) in selected.items()}
+    return {
+        project_key: (uc, uc_aneel)
+        for project_key, (_updated, uc, uc_aneel) in selected.items()
+    }
+
+
+def _build_formulario_copel_uc_by_project_name(tasks: list[dict]) -> dict[str, str]:
+    return {
+        project_key: uc
+        for project_key, (uc, _uc_aneel) in _build_formulario_project_values_by_project_name(tasks).items()
+    }
+
+
+def _build_formulario_uc_aneel_by_project_name(tasks: list[dict]) -> dict[str, str]:
+    return {
+        project_key: uc_aneel
+        for project_key, (_uc, uc_aneel) in _build_formulario_project_values_by_project_name(tasks).items()
+    }
 
 
 def _format_formulario_copel_month(value) -> str:
@@ -3110,23 +3208,76 @@ def _format_formulario_copel_month(value) -> str:
     return normalized
 
 
+def _formulario_rateio_column_indexes(headers: list) -> dict[str, int]:
+    normalized_headers: dict[str, int] = {}
+    for index, header in enumerate(headers):
+        raw_header = str(header or "").strip()
+        normalized = _normalize_text(raw_header)
+        if raw_header == "%":
+            normalized = "%"
+        if normalized and normalized not in normalized_headers:
+            normalized_headers[normalized] = index
+
+    indexes: dict[str, int] = {}
+    missing: list[str] = []
+    for field, aliases in _FORMULARIO_RATEIO_HEADER_ALIASES.items():
+        index = next(
+            (normalized_headers[alias] for alias in aliases if alias in normalized_headers),
+            None,
+        )
+        if index is None:
+            missing.append(field)
+        else:
+            indexes[field] = index
+
+    if missing:
+        raise RuntimeError(
+            "Formulario: cabecalhos obrigatorios ausentes na aba Rateio: "
+            + ", ".join(missing)
+        )
+    return indexes
+
+
 def _build_formulario_copel_rows(
     rateio_rows: list[list],
     cpf_cnpj_by_uc: dict[str, str],
     uc_by_project_name: dict[str, str],
+    uc_aneel_by_project_name: dict[str, str] | None = None,
     col_h_by_uc: dict[str, str] | None = None,
+    razao_social_by_uc: dict[str, str] | None = None,
+    address_by_uc: dict[str, str] | None = None,
+    rateio_headers: list | None = None,
 ) -> list[list[str]]:
     rows: list[list[str]] = []
+    uc_aneel_by_project_name = uc_aneel_by_project_name or {}
     col_h_by_uc = col_h_by_uc or {}
+    razao_social_by_uc = razao_social_by_uc or {}
+    address_by_uc = address_by_uc or {}
+    column_indexes = (
+        _formulario_rateio_column_indexes(rateio_headers)
+        if rateio_headers is not None
+        else {
+            "usina": 0,
+            "razao_social": 2,
+            "uc": 3,
+            "nova_uc": 4,
+            "percentual": 6,
+            "alteracao": 7,
+        }
+    )
+
+    def _source_value(row: list, field: str):
+        index = column_indexes[field]
+        return row[index] if len(row) > index else ""
 
     for source_row in rateio_rows:
         row = list(source_row or [])
-        source_usina = row[0] if len(row) > 0 else ""
-        source_razao_social = row[2] if len(row) > 2 else ""
-        source_uc = row[3] if len(row) > 3 else ""
-        source_uc_aneel = row[4] if len(row) > 4 else ""
-        source_percentual = row[6] if len(row) > 6 else ""
-        source_alteracao = _format_formulario_copel_month(row[7] if len(row) > 7 else "")
+        source_usina = _source_value(row, "usina")
+        source_razao_social = _source_value(row, "razao_social")
+        source_uc = _source_value(row, "uc")
+        source_uc_aneel = _source_value(row, "nova_uc")
+        source_percentual = _source_value(row, "percentual")
+        source_alteracao = _format_formulario_copel_month(_source_value(row, "alteracao"))
 
         mapped_values = [
             source_razao_social,
@@ -3141,66 +3292,191 @@ def _build_formulario_copel_rows(
 
         uc_key = _normalize_uc_key(source_uc)
         project_key = _formulario_copel_project_key(source_usina)
-        rows.append(
-            [
-                source_razao_social,
-                cpf_cnpj_by_uc.get(uc_key, ""),
-                source_uc,
-                source_percentual,
-                uc_by_project_name.get(project_key, ""),
-                source_usina,
-                source_alteracao,
-                col_h_by_uc.get(uc_key, "") or source_uc_aneel,
-            ]
-        )
+        razao_social = razao_social_by_uc.get(uc_key, "") or source_razao_social
+        output_row = [
+            razao_social,
+            cpf_cnpj_by_uc.get(uc_key, ""),
+            source_uc,
+            source_percentual,
+            uc_by_project_name.get(project_key, ""),
+            source_usina,
+            source_alteracao,
+            col_h_by_uc.get(uc_key, "") or source_uc_aneel,
+            address_by_uc.get(uc_key, ""),
+            uc_aneel_by_project_name.get(project_key, ""),
+        ]
+        rows.append(output_row)
 
     return rows
 
 
-def _sync_formulario_copel() -> int:
-    spreadsheet_id, _tab_name = resolve_rateio_sheet_target("COPEL")
-    if not spreadsheet_id:
-        return 0
-
-    source_ws = get_worksheet(
-        _RATEIO_COPEL_HISTORY_TAB,
-        spreadsheet_id=spreadsheet_id,
-        create_if_missing=False,
-    )
-    target_ws = get_worksheet(
-        _FORMULARIO_COPEL_TAB,
-        spreadsheet_id=spreadsheet_id,
-        create_if_missing=False,
-    )
-
-    rateio_rows = _values_get(
-        source_ws,
-        "A2:K",
-        spreadsheet_id=spreadsheet_id,
-    )
+def _load_formulario_clickup_indexes() -> tuple[
+    dict[str, str],
+    dict[str, str],
+    dict[str, str],
+    dict[str, str],
+    dict[str, str],
+    dict[str, str],
+]:
     rateio_tasks = fetch_all_tasks(
         include_closed=True,
         transform=_slim_task_with_formulario_copel_fields,
     )
     project_tasks = _fetch_clickup_tasks_from_lists(_FORMULARIO_COPEL_PROJECT_LIST_IDS)
-
-    rows = _build_formulario_copel_rows(
-        rateio_rows,
+    return (
         _build_formulario_copel_cpf_cnpj_by_uc(rateio_tasks),
         _build_formulario_copel_uc_by_project_name(project_tasks),
+        _build_formulario_uc_aneel_by_project_name(project_tasks),
         _build_formulario_copel_field_by_uc(rateio_tasks, _FORMULARIO_COPEL_COL_H_CF_ID),
+        _build_formulario_copel_field_by_uc(rateio_tasks, _FORMULARIO_RAZAO_SOCIAL_CF_ID),
+        _build_formulario_address_by_uc(rateio_tasks),
     )
+
+
+def _sync_formulario_for_distributor(
+    distributor: str,
+    *,
+    cpf_cnpj_by_uc: dict[str, str],
+    uc_by_project_name: dict[str, str],
+    uc_aneel_by_project_name: dict[str, str],
+    col_h_by_uc: dict[str, str],
+    razao_social_by_uc: dict[str, str],
+    address_by_uc: dict[str, str],
+) -> int:
+    target_tab = _FORMULARIO_TABS_BY_DISTRIBUTOR.get(distributor)
+    if not target_tab:
+        raise ValueError(f"Distribuidora sem aba de formulario configurada: {distributor!r}")
+
+    spreadsheet_id, _tab_name = resolve_rateio_sheet_target(distributor)
+    if not spreadsheet_id:
+        return 0
+
+    source_tab = _RATEIO_COPEL_HISTORY_TAB if distributor == "COPEL" else _RATEIO_HISTORY_TAB
+    source_ws = get_worksheet(
+        source_tab,
+        spreadsheet_id=spreadsheet_id,
+        create_if_missing=False,
+    )
+    target_ws = get_worksheet(
+        target_tab,
+        spreadsheet_id=spreadsheet_id,
+        create_if_missing=False,
+    )
+
+    render_option = "UNFORMATTED_VALUE" if distributor == "COPEL" else "FORMATTED_VALUE"
+    rateio_data = _values_get(
+        source_ws,
+        "A1:K",
+        spreadsheet_id=spreadsheet_id,
+        value_render_option=render_option,
+    )
+    rateio_headers = rateio_data[0] if rateio_data else []
+    rateio_rows = rateio_data[1:] if len(rateio_data) > 1 else []
+    rows = _build_formulario_copel_rows(
+        rateio_rows,
+        cpf_cnpj_by_uc,
+        uc_by_project_name,
+        uc_aneel_by_project_name,
+        col_h_by_uc,
+        razao_social_by_uc=razao_social_by_uc,
+        address_by_uc=address_by_uc,
+        rateio_headers=rateio_headers,
+    )
+    write_col_count = 10
+    current_header = _values_get(
+        target_ws,
+        "I1",
+        spreadsheet_id=spreadsheet_id,
+        value_render_option="FORMATTED_VALUE",
+    )
+    current_header_value = str(
+        current_header[0][0]
+        if current_header and current_header[0]
+        else ""
+    ).strip()
+    if current_header_value != _FORMULARIO_ADDRESS_HEADER:
+        _values_update(
+            target_ws,
+            "I1",
+            [[_FORMULARIO_ADDRESS_HEADER]],
+            spreadsheet_id=spreadsheet_id,
+        )
+    current_uc_aneel_header = _values_get(
+        target_ws,
+        "J1",
+        spreadsheet_id=spreadsheet_id,
+        value_render_option="FORMATTED_VALUE",
+    )
+    current_uc_aneel_header_value = str(
+        current_uc_aneel_header[0][0]
+        if current_uc_aneel_header and current_uc_aneel_header[0]
+        else ""
+    ).strip()
+    if current_uc_aneel_header_value != _FORMULARIO_UC_ANEEL_HEADER:
+        _values_update(
+            target_ws,
+            "J1",
+            [[_FORMULARIO_UC_ANEEL_HEADER]],
+            spreadsheet_id=spreadsheet_id,
+        )
     changed_rows = sync_rows_in_place(
         target_ws,
         rows,
-        col_count=_FORMULARIO_COPEL_WRITE_COL_COUNT,
+        col_count=write_col_count,
         spreadsheet_id=spreadsheet_id,
     )
     logger.info(
-        "Formulário COPEL: reconstruído com %d linhas (%d linhas alteradas).",
+        "%s: reconstruido com %d linhas (%d linhas alteradas).",
+        target_tab,
         len(rows),
         changed_rows,
     )
+    return changed_rows
+
+
+def _sync_formulario_copel() -> int:
+    (
+        cpf_cnpj_by_uc,
+        uc_by_project_name,
+        uc_aneel_by_project_name,
+        col_h_by_uc,
+        razao_social_by_uc,
+        address_by_uc,
+    ) = _load_formulario_clickup_indexes()
+    return _sync_formulario_for_distributor(
+        "COPEL",
+        cpf_cnpj_by_uc=cpf_cnpj_by_uc,
+        uc_by_project_name=uc_by_project_name,
+        uc_aneel_by_project_name=uc_aneel_by_project_name,
+        col_h_by_uc=col_h_by_uc,
+        razao_social_by_uc=razao_social_by_uc,
+        address_by_uc=address_by_uc,
+    )
+
+
+def _sync_all_formularios() -> int:
+    (
+        cpf_cnpj_by_uc,
+        uc_by_project_name,
+        uc_aneel_by_project_name,
+        col_h_by_uc,
+        razao_social_by_uc,
+        address_by_uc,
+    ) = _load_formulario_clickup_indexes()
+    changed_rows = 0
+    for distributor, target_tab in _FORMULARIO_TABS_BY_DISTRIBUTOR.items():
+        changed_rows += _run_sheets_step_with_retry(
+            target_tab,
+            lambda distributor_name=distributor: _sync_formulario_for_distributor(
+                distributor_name,
+                cpf_cnpj_by_uc=cpf_cnpj_by_uc,
+                uc_by_project_name=uc_by_project_name,
+                uc_aneel_by_project_name=uc_aneel_by_project_name,
+                col_h_by_uc=col_h_by_uc,
+                razao_social_by_uc=razao_social_by_uc,
+                address_by_uc=address_by_uc,
+            ),
+        )
     return changed_rows
 
 
@@ -4080,7 +4356,7 @@ def full_sync() -> None:
             ),
         )
 
-    _run_sheets_step_with_retry("Formulário COPEL (full)", _sync_formulario_copel)
+    _sync_all_formularios()
 
     elapsed = time.time() - t0
     logger.info("=== FULL SYNC concluido em %.1fs - %d linhas ===", elapsed, total_rows)
@@ -4107,7 +4383,7 @@ def delta_sync(last_updated_ts: int) -> int:
     )
 
     if not tasks:
-        _run_sheets_step_with_retry("Formulário COPEL (delta sem alteracoes)", _sync_formulario_copel)
+        _sync_all_formularios()
         log_sync_stats("DELTA SYNC (sem alteracoes)")
         return now_ms
 
@@ -4460,7 +4736,7 @@ def delta_sync(last_updated_ts: int) -> int:
                 with_excluded_plan,
             )
 
-    _run_sheets_step_with_retry("Formulário COPEL (delta)", _sync_formulario_copel)
+    _sync_all_formularios()
 
     del tasks, updated_tasks, new_tasks
     log_sync_stats("DELTA SYNC")
