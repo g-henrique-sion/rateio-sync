@@ -21,7 +21,6 @@ CLICKUP_MAX_RETRIES = max(1, int(os.getenv("CLICKUP_MAX_RETRIES", "4")))
 CLICKUP_LIST_IDS = [
     "901322296001",
     "901321549851",
-    "901324691177",
 ]
 
 # PowerRev
