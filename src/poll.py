@@ -14,6 +14,7 @@ import unicodedata
 from datetime import date, datetime, timedelta
 from typing import Callable, TypeVar
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_CEILING
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 
@@ -24,7 +25,6 @@ if __package__ is None or __package__ == "":
         sys.path.insert(0, project_root)
 
 from src.config import (
-    FULL_SYNC_INTERVAL_S,
     DELTA_SYNC_INTERVAL_S,
     PROJECTION_SPREADSHEET_ID,
     PROJECTION_SHEET_TAB,
@@ -32,6 +32,7 @@ from src.config import (
     RATEIO_GENERATION_SHEET_TAB,
     RATEIO_FAVORECIDO_TABS,
     PROJECTION_ROUND_DECIMALS,
+    APP_TIMEZONE,
     resolve_rateio_sheet_target,
 )
 from src.clients.clickup_client import fetch_all_tasks, fetch_tasks, reset_session as reset_clickup_session
@@ -100,6 +101,8 @@ _ERROR_BACKOFF_BASE = 30
 _ERROR_BACKOFF_MAX = 300
 _SHEETS_STEP_MAX_RETRIES = 5
 _SHEETS_STEP_BACKOFF_BASE = 15
+_FULL_SYNC_DAILY_HOUR = 3
+_TZ_FALLBACK_LOGGED = False
 
 _known_task_ids: set[str] = set()
 _LOW_PRIORITY_DUPLICATE_STATUSES = {
@@ -4760,6 +4763,38 @@ def _interruptible_sleep(seconds: float) -> None:
         time.sleep(min(1.0, end - time.time()))
 
 
+def _get_app_now() -> datetime:
+    global _TZ_FALLBACK_LOGGED
+
+    tz_name = (APP_TIMEZONE or "").strip()
+    if not tz_name:
+        return datetime.now()
+
+    try:
+        return datetime.now(ZoneInfo(tz_name))
+    except ZoneInfoNotFoundError:
+        if not _TZ_FALLBACK_LOGGED:
+            logger.warning(
+                "Timezone '%s' indisponivel neste ambiente. "
+                "Usando fallback UTC-03:00 para agendamento do full sync.",
+                tz_name,
+            )
+            _TZ_FALLBACK_LOGGED = True
+        return datetime.now().astimezone().replace(tzinfo=None)
+
+
+def _next_daily_full_sync_after(
+    now: datetime | None = None,
+    *,
+    hour: int = _FULL_SYNC_DAILY_HOUR,
+) -> datetime:
+    current = now or _get_app_now()
+    scheduled = current.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if current >= scheduled:
+        scheduled += timedelta(days=1)
+    return scheduled
+
+
 def _run_full_sync_until_success(reason: str) -> bool:
     attempt = 0
     while not _shutdown_requested:
@@ -4807,7 +4842,11 @@ def main() -> None:
         logger.info("Shutdown antes da conclusao do full sync inicial.")
         return
 
-    last_full = time.time()
+    next_full_at = _next_daily_full_sync_after()
+    logger.info(
+        "Proximo full sync diario agendado para %s.",
+        next_full_at.strftime("%d/%m/%Y %H:%M:%S"),
+    )
     last_delta_ts = int(time.time() * 1000)
     consecutive_errors = 0
     cycle_count = 0
@@ -4820,6 +4859,7 @@ def main() -> None:
                 break
 
             now = time.time()
+            now_local = _get_app_now()
             cycle_count += 1
 
             if cycle_count % 10 == 0:
@@ -4832,10 +4872,14 @@ def main() -> None:
                     consecutive_errors,
                 )
 
-            if now - last_full >= FULL_SYNC_INTERVAL_S:
+            if now_local >= next_full_at:
                 if not _run_full_sync_until_success("programado"):
                     break
-                last_full = time.time()
+                next_full_at = _next_daily_full_sync_after(_get_app_now())
+                logger.info(
+                    "Proximo full sync diario agendado para %s.",
+                    next_full_at.strftime("%d/%m/%Y %H:%M:%S"),
+                )
                 last_delta_ts = int(time.time() * 1000)
             else:
                 last_delta_ts = delta_sync(last_delta_ts)
