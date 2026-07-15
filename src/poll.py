@@ -63,6 +63,8 @@ from src.core.row_builder import (
     slim_task,
     build_row,
     extract_task_uc,
+    extract_task_uc_old,
+    extract_task_uc_match_candidates,
     extract_task_status,
     extract_task_plan,
     extract_task_target_tab,
@@ -293,6 +295,12 @@ _NEW_COOPERADO_DELAYED_STATUS_RAW = {
     "Novo Cooperado - Em Contingencia",
 }
 _NEW_COOPERADO_RATEIO_DELAY_MONTHS = 2
+_NEW_COOPERADO_RATEIO_DELAY_MONTHS_BY_DISTRIBUTOR = {
+    "COPEL": 2,
+    "AmE": 1,
+    "CELESC": 1,
+    "Energisa MS": 1,
+}
 
 
 def _add_months(yyyymm: int, offset: int) -> int:
@@ -337,8 +345,8 @@ def _previous_month_int(month: int) -> int:
 def _collect_target_ucs(tasks: list[dict]) -> set[str]:
     target_ucs: set[str] = set()
     for task in tasks:
-        uc = extract_task_uc(task)
-        if not uc:
+        uc_candidates = extract_task_uc_match_candidates(task)
+        if not uc_candidates:
             continue
         if _is_plan_excluded_from_rateio(extract_task_plan(task)):
             continue
@@ -346,7 +354,7 @@ def _collect_target_ucs(tasks: list[dict]) -> set[str]:
             continue
         if not _resolve_supported_favorecido(extract_task_favorecido(task)):
             continue
-        target_ucs.add(uc)
+        target_ucs.update(uc_candidates)
 
     return target_ucs
 
@@ -542,10 +550,18 @@ def _is_new_cooperado_delayed_status(status_value: str) -> bool:
     return _normalize_status_key(status_value) in _NEW_COOPERADO_DELAYED_STATUS_KEYS
 
 
+def _new_cooperado_rateio_delay_months(distributor: str) -> int:
+    return _NEW_COOPERADO_RATEIO_DELAY_MONTHS_BY_DISTRIBUTOR.get(
+        str(distributor or "").strip(),
+        _NEW_COOPERADO_RATEIO_DELAY_MONTHS,
+    )
+
+
 def _is_rateio_month_blocked_by_new_cooperado_delay(
     status_value: str,
     rateio_month: str,
     current_month: int,
+    distributor: str,
 ) -> bool:
     if not _is_new_cooperado_delayed_status(status_value):
         return False
@@ -554,7 +570,10 @@ def _is_rateio_month_blocked_by_new_cooperado_delay(
     if rateio_month_int is None:
         return True
 
-    first_allowed_month = _add_months(current_month, _NEW_COOPERADO_RATEIO_DELAY_MONTHS)
+    first_allowed_month = _add_months(
+        current_month,
+        _new_cooperado_rateio_delay_months(distributor),
+    )
     return rateio_month_int < first_allowed_month
 
 
@@ -3763,9 +3782,16 @@ def _inject_projection_value(
     uc: str,
     payload: dict[str, str],
     projection_index: dict[tuple[str, str], str],
+    *,
+    lookup_ucs: list[str] | None = None,
 ) -> dict[str, str]:
     month_ref = _normalize_month_reference(payload.get("nuMesReferencia", ""))
-    proj_value = projection_index.get((normalize_uc(uc), month_ref), "")
+    proj_value = ""
+    candidates = lookup_ucs or [uc]
+    for candidate in candidates:
+        proj_value = projection_index.get((normalize_uc(candidate), month_ref), "")
+        if str(proj_value).strip():
+            break
     enriched = dict(payload)
     enriched["projecao_consumo"] = proj_value
     return enriched
@@ -3826,19 +3852,23 @@ def _latest_powerrev_invoice_issue_for_month(
     uc: str,
     month: int,
     invoice_by_month: dict[int, dict[str, dict[str, str]]],
+    *,
+    lookup_ucs: list[str] | None = None,
 ) -> str:
-    normalized_uc = normalize_uc(uc)
-    if not normalized_uc:
+    candidates = [normalize_uc(candidate) for candidate in (lookup_ucs or [uc]) if normalize_uc(candidate)]
+    if not candidates:
         return ""
 
     for candidate_month in sorted(
         (m for m in invoice_by_month if int(m) <= int(month)),
         reverse=True,
     ):
-        invoice = invoice_by_month.get(candidate_month, {}).get(normalized_uc) or {}
-        issue_value = invoice.get("dtEmissao") or invoice.get("invoice_issue_day") or ""
-        if _powerrev_invoice_issue_day(issue_value) is not None:
-            return str(issue_value).strip()
+        invoices = invoice_by_month.get(candidate_month, {})
+        for normalized_uc in candidates:
+            invoice = invoices.get(normalized_uc) or {}
+            issue_value = invoice.get("dtEmissao") or invoice.get("invoice_issue_day") or ""
+            if _powerrev_invoice_issue_day(issue_value) is not None:
+                return str(issue_value).strip()
 
     return ""
 
@@ -3847,6 +3877,8 @@ def _build_open_month_payload(
     uc: str,
     month: int,
     invoice_by_month: dict[int, dict[str, dict[str, str]]],
+    *,
+    lookup_ucs: list[str] | None = None,
 ) -> dict[str, str]:
     """
     Monta a linha aberta do mês X usando o saldo final real de X-1.
@@ -3855,8 +3887,17 @@ def _build_open_month_payload(
     anterior, portanto entra diretamente como saldo inicial do mês seguinte.
     """
     previous_month = _previous_month_int(month)
-    previous_invoice = invoice_by_month.get(previous_month, {}).get(uc) or {}
-    issue_value = _latest_powerrev_invoice_issue_for_month(uc, month, invoice_by_month)
+    previous_invoice = {}
+    for candidate in lookup_ucs or [uc]:
+        previous_invoice = invoice_by_month.get(previous_month, {}).get(normalize_uc(candidate)) or {}
+        if previous_invoice:
+            break
+    issue_value = _latest_powerrev_invoice_issue_for_month(
+        uc,
+        month,
+        invoice_by_month,
+        lookup_ucs=lookup_ucs,
+    )
     issue_day = _powerrev_invoice_issue_day(issue_value)
     return {
         "nuMesReferencia": format_reference_month(month),
@@ -4123,6 +4164,7 @@ def full_sync() -> None:
         if not uc:
             without_uc += 1
             continue
+        lookup_ucs = extract_task_uc_match_candidates(task) or [uc]
 
         distributor = extract_task_target_tab(task)
         if distributor not in TARGET_SHEET_TABS:
@@ -4147,10 +4189,16 @@ def full_sync() -> None:
                 status_value,
                 rateio_month,
                 current_month,
+                distributor,
             ):
                 delayed_new_cooperado_rows += 1
                 continue
-            base_payload = _build_open_month_payload(uc, month, invoice_by_month)
+            base_payload = _build_open_month_payload(
+                uc,
+                month,
+                invoice_by_month,
+                lookup_ucs=lookup_ucs,
+            )
             favorecido = _resolve_effective_favorecido_for_rateio_month(
                 task=task,
                 distributor=distributor,
@@ -4162,7 +4210,12 @@ def full_sync() -> None:
                 without_rateio_target += 1
                 continue
 
-            enriched_payload = _inject_projection_value(uc, base_payload, projection_index)
+            enriched_payload = _inject_projection_value(
+                uc,
+                base_payload,
+                projection_index,
+                lookup_ucs=lookup_ucs,
+            )
             if not _has_projection_value(enriched_payload.get("projecao_consumo", "")):
                 without_projection += 1
                 continue
@@ -4448,6 +4501,7 @@ def delta_sync(last_updated_ts: int) -> int:
             uc = extract_task_uc(task)
             if not uc:
                 continue
+            lookup_ucs = extract_task_uc_match_candidates(task) or [uc]
 
             distributor = extract_task_target_tab(task)
             favorecido_original = _resolve_supported_favorecido(extract_task_favorecido(task))
@@ -4465,7 +4519,7 @@ def delta_sync(last_updated_ts: int) -> int:
             for month in months_window:
                 month_ref = format_reference_month(month)
                 rateio_month = format_reference_month(_add_months(month, 1))
-                key = (uc, month_ref)
+                keys = [(candidate, month_ref) for candidate in lookup_ucs]
                 if distributor in TARGET_SHEET_TABS and favorecido_original is not None:
                     favorecido = _resolve_effective_favorecido_for_rateio_month(
                         task=task,
@@ -4488,6 +4542,7 @@ def delta_sync(last_updated_ts: int) -> int:
                     status_value,
                     rateio_month,
                     current_month,
+                    distributor,
                 )
 
                 if (
@@ -4496,8 +4551,18 @@ def delta_sync(last_updated_ts: int) -> int:
                     and not exclude_from_plan
                     and not blocked_by_new_cooperado_delay
                 ):
-                    base_payload = _build_open_month_payload(uc, month, invoice_by_month)
-                    enriched_payload = _inject_projection_value(uc, base_payload, projection_index)
+                    base_payload = _build_open_month_payload(
+                        uc,
+                        month,
+                        invoice_by_month,
+                        lookup_ucs=lookup_ucs,
+                    )
+                    enriched_payload = _inject_projection_value(
+                        uc,
+                        base_payload,
+                        projection_index,
+                        lookup_ucs=lookup_ucs,
+                    )
                     if _has_projection_value(enriched_payload.get("projecao_consumo", "")):
                         row_data = build_row(task, enriched_payload)
                         if skip_projection:
@@ -4534,7 +4599,7 @@ def delta_sync(last_updated_ts: int) -> int:
                 existing_targets = [
                     existing_target
                     for existing_target in _RATEIO_TARGETS
-                    if key in uc_month_rows_by_target[existing_target]
+                    if any(key in uc_month_rows_by_target[existing_target] for key in keys)
                 ]
                 target_was_updated = False
                 cleared_for_item = 0
@@ -4547,7 +4612,11 @@ def delta_sync(last_updated_ts: int) -> int:
                     ):
                         continue
 
-                    row_idx = uc_month_rows_by_target[existing_target][key]
+                    row_idx = next(
+                        uc_month_rows_by_target[existing_target][key]
+                        for key in keys
+                        if key in uc_month_rows_by_target[existing_target]
+                    )
                     if existing_target == target and not should_clear:
                         updates_by_target[existing_target][row_idx] = row_data
                         impacted_months_by_target[existing_target].add(month_ref)
@@ -4573,7 +4642,14 @@ def delta_sync(last_updated_ts: int) -> int:
                         removed_by_new_cooperado_delay += cleared_for_item
 
                 if target is not None and not should_clear and not target_was_updated:
-                    target_row = uc_month_rows_by_target[target].get(key)
+                    target_row = next(
+                        (
+                            uc_month_rows_by_target[target].get(key)
+                            for key in keys
+                            if key in uc_month_rows_by_target[target]
+                        ),
+                        None,
+                    )
                     target_is_frozen = _is_rateio_month_frozen(
                         rateio_month,
                         frozen_months_by_distributor[target[0]],

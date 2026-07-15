@@ -125,6 +125,9 @@ def _extract_field_value(task: dict, key: str, invoice_data: dict | None = None)
     if not field_def:
         return ""
 
+    if key == "uc":
+        return extract_task_uc(task)
+
     source = field_def.get("source", "")
 
     if source == "task_field":
@@ -150,7 +153,15 @@ def _extract_field_value(task: dict, key: str, invoice_data: dict | None = None)
 
 
 def extract_task_uc(task: dict) -> str:
-    """Extract UC from task."""
+    """Extract UC from task, falling back to UC Aneel when needed."""
+    uc = normalize_uc(_get_cf_value(task, _UC_CF_ID))
+    if uc:
+        return uc
+    return normalize_uc(_get_cf_value(task, _UC_ANEEL_CF_ID))
+
+
+def extract_task_uc_old(task: dict) -> str:
+    """Return the primary legacy UC stored in ClickUp."""
     return normalize_uc(_get_cf_value(task, _UC_CF_ID))
 
 
@@ -210,6 +221,18 @@ def extract_task_invoice_issue_day(task: dict) -> str:
 def extract_task_uc_aneel(task: dict) -> str:
     """Return the UC Aneel stored in ClickUp."""
     return _get_cf_value(task, _UC_ANEEL_CF_ID).strip()
+
+
+def extract_task_uc_match_candidates(task: dict) -> list[str]:
+    """Return ordered UC candidates for lookups and matching."""
+    candidates: list[str] = []
+    for value in (
+        extract_task_uc_old(task),
+        normalize_uc(extract_task_uc_aneel(task)),
+    ):
+        if value and value not in candidates:
+            candidates.append(value)
+    return candidates
 
 
 def extract_task_helexia_pr_matriz_rateio_months(task: dict) -> str:
