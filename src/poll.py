@@ -3623,7 +3623,11 @@ def _build_generation_rows_by_tab() -> dict[str, list[list[str]]]:
             ignored_without_distributor += 1
             continue
         if favorecido is None:
-            ignored_without_favorecido += 1
+            enabled_favorecidos = _rateio_favorecidos_for_distributor(target_tab)
+            if len(enabled_favorecidos) == 1:
+                favorecido = enabled_favorecidos[0]
+            else:
+                ignored_without_favorecido += 1
 
         rows_by_tab[target_tab].append(
             [
