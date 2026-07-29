@@ -72,6 +72,8 @@ _LAST_DETAIL_REQUEST_TS = 0.0
 _LAST_REQUEST_TS = 0.0
 
 _TZ_FALLBACK_LOGGED = False
+_SALDO_ITEM_IDS = {23, 24, 626}
+_SALDO_CACHE_VERSION = 2
 _BATCH_JOB_DONE_STATUSES = {"done", "success", "completed", "finished", "ready"}
 _BATCH_JOB_FAILED_STATUSES = {"failed", "error", "canceled", "cancelled"}
 
@@ -516,6 +518,12 @@ def _is_cache_entry_valid(entry: dict, updated_at: str) -> bool:
 
     if "saldo23_24" not in entry:
         return False
+    try:
+        cache_version = int(entry.get("saldoVersion") or 0)
+    except (TypeError, ValueError):
+        return False
+    if cache_version != _SALDO_CACHE_VERSION:
+        return False
 
     if not updated_at:
         return True
@@ -608,6 +616,7 @@ def _set_cached_saldo(
     entry = {
         "updatedAt": updated_at or "",
         "saldo23_24": saldo,
+        "saldoVersion": _SALDO_CACHE_VERSION,
     }
     if dt_emissao:
         entry["dtEmissao"] = dt_emissao
@@ -641,7 +650,7 @@ def _fetch_invoice_detail(invoice_id: str) -> dict:
 
 
 def _extract_saldo_23_24(detail: dict) -> float | None:
-    """Soma itens de id 23 e 24 do detalhe da fatura."""
+    """Soma itens de saldo de energia do detalhe da fatura."""
     items = detail.get("itens")
     if not isinstance(items, list):
         return None
@@ -655,7 +664,7 @@ def _extract_saldo_23_24(detail: dict) -> float | None:
             item_id = int(item.get("id"))
         except (TypeError, ValueError):
             continue
-        if item_id not in (23, 24):
+        if item_id not in _SALDO_ITEM_IDS:
             continue
 
         value = _parse_number(item.get("value"))
