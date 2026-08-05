@@ -251,6 +251,7 @@ _AME_HISTORY_INVOICE_ISSUE_DAY_THRESHOLD = 7
 _T = TypeVar("_T")
 
 _EXCLUDED_STATUS_FROM_PROJECTION_RAW = {
+    "Cancelado - Autoconsumo",
     "Encerrado - Financeiro",
     "Baixo Consumo",
     "A Retirar da Usina - DemissÃƒÆ’Ã‚Â£o",
@@ -264,6 +265,7 @@ _EXCLUDED_STATUS_FROM_PROJECTION_RAW = {
 }
 
 _EXCLUDED_STATUS_FROM_RATEIO_RAW = {
+    "Cancelado - Autoconsumo",
     "Planejamento - Black",
     "Aguardando Cadastro",
     "Aguardando Cadastro - Usina",
