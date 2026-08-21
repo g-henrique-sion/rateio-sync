@@ -108,7 +108,10 @@ def fetch_tasks(
         all_tasks.extend(tasks)
         stats.clickup_tasks_fetched += len(tasks)
 
-        if len(tasks) < effective_page_limit:
+        last_page = data.get("last_page")
+        if last_page is True:
+            break
+        if last_page is not False and not tasks:
             break
         page += 1
         time.sleep(CLICKUP_PAGE_PAUSE_S)
