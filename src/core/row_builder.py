@@ -20,8 +20,6 @@ _PLAN_CF_ID = FIELD_MAP["plano"]["cf_id"]
 _ROUTING_CF_ID = TAB_ROUTING["field_id"]
 _FAVORECIDO_CF_ID = "0a73e7b8-febe-4982-9263-06efd75612e1"
 _INVOICE_ISSUE_DAY_CF_ID = "c4f18991-f556-4019-af84-157c55aada63"
-_HELEXIA_PR_MATRIZ_RATEIO_MONTHS_CF_ID = "f53875e8-8275-46bf-a4b4-d685d86546b4"
-_COPEL_MATRIZ_AUGUST_2026_CF_ID = "d4acac12-637e-4e38-af10-049aa89fae28"
 _UC_ANEEL_CF_ID = "cd8687a7-0393-45b9-8292-f9b878b31512"
 
 
@@ -235,24 +233,6 @@ def extract_task_uc_match_candidates(task: dict) -> list[str]:
     return candidates
 
 
-def extract_task_helexia_pr_matriz_rateio_months(task: dict) -> str:
-    """Return rateio months where COPEL/Helexia PR must route to Sion - Matriz."""
-    return _get_cf_value(task, _HELEXIA_PR_MATRIZ_RATEIO_MONTHS_CF_ID).strip()
-
-
-def is_task_copel_matriz_august_2026_checked(task: dict) -> bool:
-    """Return whether the one-off COPEL Matriz routing checkbox is checked."""
-    cf = _get_custom_field(task, _COPEL_MATRIZ_AUGUST_2026_CF_ID)
-    if cf is None:
-        return False
-    value = cf.get("value")
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    return str(value or "").strip().casefold() in {"true", "1", "sim", "yes", "checked"}
-
-
 def slim_task(task: dict) -> dict:
     """Return slim task payload with only needed fields."""
     needed_cf_ids = {
@@ -263,8 +243,6 @@ def slim_task(task: dict) -> dict:
     needed_cf_ids.add(_ROUTING_CF_ID)
     needed_cf_ids.add(_FAVORECIDO_CF_ID)
     needed_cf_ids.add(_INVOICE_ISSUE_DAY_CF_ID)
-    needed_cf_ids.add(_HELEXIA_PR_MATRIZ_RATEIO_MONTHS_CF_ID)
-    needed_cf_ids.add(_COPEL_MATRIZ_AUGUST_2026_CF_ID)
     needed_cf_ids.add(_UC_ANEEL_CF_ID)
 
     slim_cfs = [

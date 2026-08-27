@@ -71,8 +71,6 @@ from src.core.row_builder import (
     extract_task_favorecido,
     extract_task_invoice_issue_day,
     extract_task_uc_aneel,
-    extract_task_helexia_pr_matriz_rateio_months,
-    is_task_copel_matriz_august_2026_checked,
     normalize_uc,
 )
 from src.core.field_map import FIELD_MAP, COLUMN_ORDER, get_headers, TARGET_SHEET_TABS
@@ -181,6 +179,9 @@ _FAVORECIDO_HEADER = "Favorecido"
 _UC_ANEEL_OUTPUT_COL_INDEX = 15  # P
 _UC_ANEEL_HEADER = "UC Aneel"
 _UC_ANEEL_MISSING_VALUE = "Sem UC Aneel"
+_COPEL_SHARED_RATEIO_EXCLUDED_RAZAO_SOCIAIS = (
+    "MONTE SIAO COOPERATIVA DE ENERGIA",
+)
 _RATEIO_CONFIGURATION_TAB = "Configura\u00e7\u00e3o"
 _RATEIO_CONFIGURATION_CLOSED_STATUS = "fechado"
 _SHEETS_SERIAL_BASE = date(1899, 12, 30)
@@ -233,9 +234,7 @@ _SPECIAL_ALLOCATION_DEFAULTS = {
         "remainder_uc": "10/3713101-8",
     },
 }
-_CONFIGURABLE_CONTINGENCY_COEFFICIENTS = {
-    ("Energisa MS", "Sion - Helexia MS"),
-}
+_CONFIGURABLE_CONTINGENCY_COEFFICIENTS = set(_RATEIO_TARGETS)
 _FIXED_CONTINGENCY_COEFFICIENTS_BY_MONTH = {
     ("COPEL", "Sion - Matriz"): {
         "01-08-2026": Decimal("0.00000000"),
@@ -244,7 +243,6 @@ _FIXED_CONTINGENCY_COEFFICIENTS_BY_MONTH = {
 _HELEXIA_PR_MATRIZ_SOURCE_DISTRIBUTOR = "COPEL"
 _HELEXIA_PR_MATRIZ_SOURCE_FAVORECIDO = "Sion - Helexia PR"
 _HELEXIA_PR_MATRIZ_TARGET_FAVORECIDO = "Sion - Matriz"
-_COPEL_MATRIZ_CHECKBOX_RATEIO_MONTH = "01-08-2026"
 _DEFAULT_HISTORY_INVOICE_ISSUE_DAY_THRESHOLD = 10
 _AME_HISTORY_INVOICE_ISSUE_DAY_THRESHOLD = 7
 
@@ -515,6 +513,10 @@ _EXCLUDED_STATUS_FROM_RATEIO_KEYS = {
     _normalize_status_key(status)
     for status in _EXCLUDED_STATUS_FROM_RATEIO_RAW
 }
+_COPEL_SHARED_RATEIO_EXCLUDED_RAZAO_SOCIAL_KEYS = {
+    _normalize_status_key(razao_social)
+    for razao_social in _COPEL_SHARED_RATEIO_EXCLUDED_RAZAO_SOCIAIS
+}
 _LOW_PRIORITY_DUPLICATE_STATUS_KEYS = {
     _normalize_status_key(status)
     for status in _LOW_PRIORITY_DUPLICATE_STATUSES
@@ -536,6 +538,14 @@ def _is_status_excluded_from_rateio(status_value: str) -> bool:
         not normalized
         or normalized in _EXCLUDED_STATUS_FROM_RATEIO_KEYS
         or normalized.startswith("aguardando cadastro ")
+    )
+
+
+def _is_shared_rateio_excluded_row(distributor: str, razao_social: str) -> bool:
+    return (
+        str(distributor or "").strip() == "COPEL"
+        and _normalize_status_key(razao_social)
+        in _COPEL_SHARED_RATEIO_EXCLUDED_RAZAO_SOCIAL_KEYS
     )
 
 
@@ -634,6 +644,17 @@ def _configuration_contingency_header(favorecido: str) -> str:
     return f"{_RATEIO_CONFIGURATION_CONTINGENCY_PREFIX} {favorecido}"
 
 
+def _configurable_contingency_favorecidos_for_distributor(distributor: str) -> tuple[str, ...]:
+    distributor_name = str(distributor or "").strip()
+    enabled_favorecidos = set(_rateio_favorecidos_for_distributor(distributor_name))
+    return tuple(
+        favorecido
+        for favorecido in _RATEIO_CONFIGURATION_FAVORECIDOS
+        if favorecido in enabled_favorecidos
+        and (distributor_name, favorecido) in _CONFIGURABLE_CONTINGENCY_COEFFICIENTS
+    )
+
+
 def _configuration_headers_for_distributor(distributor: str) -> list[str]:
     distributor_name = str(distributor or "").strip()
     enabled_favorecidos = _rateio_favorecidos_for_distributor(distributor_name)
@@ -653,9 +674,8 @@ def _configuration_headers_for_distributor(distributor: str) -> list[str]:
         if str(special_defaults.get("remainder_uc") or "").strip():
             headers.append(_RATEIO_CONFIGURATION_REMAINDER_UC_HEADER)
 
-    for configured_distributor, favorecido in sorted(_CONFIGURABLE_CONTINGENCY_COEFFICIENTS):
-        if configured_distributor == distributor_name and favorecido in enabled_favorecidos:
-            headers.append(_configuration_contingency_header(favorecido))
+    for favorecido in _configurable_contingency_favorecidos_for_distributor(distributor_name):
+        headers.append(_configuration_contingency_header(favorecido))
 
     return headers
 
@@ -750,6 +770,18 @@ def _default_contingency_coefficient(distributor: str, favorecido: str) -> Decim
     return Decimal("0.90000000")
 
 
+def _default_contingency_coefficient_for_month(
+    distributor: str,
+    favorecido: str,
+    rateio_month: str,
+) -> Decimal:
+    fixed = _FIXED_CONTINGENCY_COEFFICIENTS_BY_MONTH.get((distributor, favorecido), {})
+    return fixed.get(
+        rateio_month,
+        _default_contingency_coefficient(distributor, favorecido),
+    )
+
+
 def _resolve_task_rateio_target(task: dict) -> tuple[str, str] | None:
     if _is_plan_excluded_from_rateio(extract_task_plan(task)):
         return None
@@ -762,15 +794,6 @@ def _resolve_task_rateio_target(task: dict) -> tuple[str, str] | None:
     return distributor, favorecido
 
 
-def _parse_rateio_months_field(value: str) -> set[str]:
-    months: set[str] = set()
-    for part in str(value or "").split(","):
-        month_ref = _normalize_month_reference(part.strip())
-        if month_ref:
-            months.add(month_ref)
-    return months
-
-
 def _resolve_effective_favorecido_for_rateio_month(
     *,
     task: dict,
@@ -778,38 +801,13 @@ def _resolve_effective_favorecido_for_rateio_month(
     favorecido: str,
     rateio_month: str,
 ) -> str:
-    """Resolve routing-only Favorecido exceptions for a specific rateio month."""
-    if _is_copel_matriz_checkbox_override(
-        task=task,
-        distributor=distributor,
-        rateio_month=rateio_month,
-    ):
-        return _HELEXIA_PR_MATRIZ_TARGET_FAVORECIDO
-
-    normalized_rateio_month = _normalize_month_reference_any(rateio_month)
+    """Resolve routing-only Favorecido exceptions."""
     if (
         distributor == _HELEXIA_PR_MATRIZ_SOURCE_DISTRIBUTOR
         and favorecido == _HELEXIA_PR_MATRIZ_SOURCE_FAVORECIDO
     ):
-        exception_months = _parse_rateio_months_field(
-            extract_task_helexia_pr_matriz_rateio_months(task)
-        )
-        if normalized_rateio_month in exception_months:
-            return _HELEXIA_PR_MATRIZ_TARGET_FAVORECIDO
+        return _HELEXIA_PR_MATRIZ_TARGET_FAVORECIDO
     return favorecido
-
-
-def _is_copel_matriz_checkbox_override(
-    *,
-    task: dict,
-    distributor: str,
-    rateio_month: str,
-) -> bool:
-    return (
-        distributor == _HELEXIA_PR_MATRIZ_SOURCE_DISTRIBUTOR
-        and _normalize_month_reference_any(rateio_month) == _COPEL_MATRIZ_CHECKBOX_RATEIO_MONTH
-        and is_task_copel_matriz_august_2026_checked(task)
-    )
 
 
 def _favorecido_output_for_rateio_month(
@@ -820,12 +818,7 @@ def _favorecido_output_for_rateio_month(
     effective_favorecido: str,
     rateio_month: str,
 ) -> str:
-    if _is_copel_matriz_checkbox_override(
-        task=task,
-        distributor=distributor,
-        rateio_month=rateio_month,
-    ):
-        return effective_favorecido
+    del task, distributor, effective_favorecido, rateio_month
     return original_favorecido
 
 
@@ -1060,14 +1053,31 @@ def _validate_generation_goals(
 def _required_goal_months_for_rows(
     rows: list[list],
     frozen_rateio_months: set[str] | None = None,
+    *,
+    distributor: str = "",
+    reference_months: set[str] | None = None,
 ) -> set[str]:
     required: set[str] = set()
+    normalized_reference_months = {
+        month
+        for month in (
+            _normalize_month_reference_any(month_ref)
+            for month_ref in (reference_months or set())
+        )
+        if month
+    }
     for row in rows:
         rateio_month = _normalize_month_reference_any(row[0] if row else "")
+        month_ref = _normalize_month_reference_any(row[6] if len(row) > 6 else "")
         if not rateio_month or _is_rateio_month_frozen(
             rateio_month,
             frozen_rateio_months,
         ):
+            continue
+        if normalized_reference_months and month_ref not in normalized_reference_months:
+            continue
+        razao_social = str(row[5] if len(row) > 5 else "").strip()
+        if _is_shared_rateio_excluded_row(distributor, razao_social):
             continue
         required.add(rateio_month)
     return required
@@ -1135,12 +1145,6 @@ def _apply_k_l_m_targets(
             key=lambda m: _month_ref_to_int(m) or 0,
         )
         reference_label = ",".join(reference_months)
-        goal = goals.get(rateio_month)
-        if goal is None:
-            raise RuntimeError(
-                f"Rateio '{sheet_label}' alteracao {rateio_month} "
-                f"(referencia {reference_label}) sem meta de geracao validada."
-            )
 
         fixed_rows: list[dict] = []
         adjustable_rows: list[dict] = []
@@ -1199,12 +1203,25 @@ def _apply_k_l_m_targets(
             r["saldo_base"] = saldo_base
             r["necessidade_injecao"] = max(r["h"] - saldo_base, Decimal("0"))
 
+            if r.get("excluded_from_shared_rateio"):
+                r["l_target"] = ""
+                r["m_target"] = ""
+                continue
+
             if r.get("is_contingencia"):
                 fixed_rows.append(r)
             else:
                 adjustable_rows.append(r)
 
-        goal_int = Decimal(max(int(goal), 0))
+        shared_rows = fixed_rows + adjustable_rows
+        goal = goals.get(rateio_month)
+        if shared_rows and goal is None:
+            raise RuntimeError(
+                f"Rateio '{sheet_label}' alteracao {rateio_month} "
+                f"(referencia {reference_label}) sem meta de geracao validada."
+            )
+        goal_value = goal if goal is not None else Decimal("0")
+        goal_int = Decimal(max(int(goal_value), 0))
 
         def _m_int_for_row(rr: dict, coef: Decimal) -> Decimal:
             m_val = (_m_consumption_for_row(rr) * coef) - rr["k_target"]
@@ -1446,12 +1463,17 @@ def _apply_k_l_m_targets(
                 rr["m_target"] = _m_int_for_row(rr, global_coef)
 
         for rr in month_rows:
-            rr["_m_int"] = Decimal(_decimal_to_int_half_up(rr.get("m_target", Decimal("0"))))
-            rr["m_target"] = rr["_m_int"]
+            if rr.get("excluded_from_shared_rateio"):
+                rr["l_target"] = ""
+                rr["m_target"] = ""
+                rr["_m_int"] = Decimal("0")
+            else:
+                rr["_m_int"] = Decimal(_decimal_to_int_half_up(rr.get("m_target", Decimal("0"))))
+                rr["m_target"] = rr["_m_int"]
             uc_key = _normalize_uc_key(rr.get("uc", ""))
             month_ref_norm = _normalize_month_reference_any(rr.get("month_ref", ""))
             rateio_month_norm = _normalize_month_reference_any(rr.get("rateio_month", ""))
-            if uc_key and rateio_month_norm:
+            if not rr.get("excluded_from_shared_rateio") and uc_key and rateio_month_norm:
                 m_by_key[(uc_key, rateio_month_norm)] = rr["_m_int"]
             if uc_key and month_ref_norm:
                 k_by_key[(uc_key, month_ref_norm)] = rr.get("k_target", Decimal("0"))
@@ -1460,7 +1482,7 @@ def _apply_k_l_m_targets(
         total_consumo_m = Decimal("0")
         total_necessidade = Decimal("0")
         final_sum_int = Decimal("0")
-        for rr in month_rows:
+        for rr in shared_rows:
             total_consumo += rr["h"]
             total_consumo_m += _m_consumption_for_row(rr)
             total_necessidade += rr.get("necessidade_injecao", Decimal("0"))
@@ -1489,7 +1511,7 @@ def _apply_k_l_m_targets(
             _format_decimal_plain(total_consumo),
             _format_decimal_plain(total_consumo_m),
             _format_decimal_plain(total_necessidade),
-            _format_decimal_plain(goal),
+            _format_decimal_plain(goal_value),
             _format_decimal_plain(global_coef),
             _format_decimal_plain(final_sum_int),
             _format_decimal_plain(diff),
@@ -1572,6 +1594,7 @@ def _recalculate_k_l_m_with_monthly_goal(
             rateio_month = str(row[0] if len(row) > 0 else "").strip()
             status_value = str(row[1] if len(row) > 1 else "").strip()
             uc = normalize_uc(row[3] if len(row) > 3 else "")
+            razao_social = str(row[5] if len(row) > 5 else "").strip()
             month_ref = str(row[6] if len(row) > 6 else "").strip()
             val_h = _to_decimal(row[7] if len(row) > 7 else "")
             i_raw = row[8] if len(row) > 8 else ""
@@ -1605,6 +1628,7 @@ def _recalculate_k_l_m_with_monthly_goal(
                 "row_idx": row_idx,
                 "status": status_value,
                 "uc": uc,
+                "razao_social": razao_social,
                 "month_ref": month_ref,
                 "rateio_month": _normalize_month_reference_any(rateio_month),
                 "invoice_issue_day": invoice_issue_day,
@@ -1629,6 +1653,10 @@ def _recalculate_k_l_m_with_monthly_goal(
                 "m_target": None,
                 "is_contingencia": _contains_contingencia(status_value),
                 "skip_calc": _is_status_excluded_from_projection(status_value),
+                "excluded_from_shared_rateio": _is_shared_rateio_excluded_row(
+                    distributor,
+                    razao_social,
+                ),
                 "frozen": _is_rateio_month_frozen(
                     rateio_month_norm,
                     frozen_rateio_months,
@@ -1822,6 +1850,7 @@ def _recalculate_k_l_m_for_months(
         rateio_month = str(row[0] if len(row) > 0 else "").strip()
         status_value = str(row[1] if len(row) > 1 else "").strip()
         uc = normalize_uc(row[3] if len(row) > 3 else "")
+        razao_social = str(row[5] if len(row) > 5 else "").strip()
         month_ref = str(row[6] if len(row) > 6 else "").strip()
         uc_key_all = _normalize_uc_key(uc)
         month_ref_norm = _normalize_month_reference_any(month_ref)
@@ -1864,6 +1893,7 @@ def _recalculate_k_l_m_for_months(
             "row_idx": row_idx,
             "status": status_value,
             "uc": uc,
+            "razao_social": razao_social,
             "month_ref": month_ref,
             "rateio_month": _normalize_month_reference_any(rateio_month),
             "invoice_issue_day": invoice_issue_day,
@@ -1888,6 +1918,10 @@ def _recalculate_k_l_m_for_months(
             "m_target": current_m,
             "is_contingencia": _contains_contingencia(status_value),
             "skip_calc": _is_status_excluded_from_projection(status_value),
+            "excluded_from_shared_rateio": _is_shared_rateio_excluded_row(
+                distributor,
+                razao_social,
+            ),
             "frozen": False,
         }
 
@@ -2628,8 +2662,9 @@ def _sync_rateio_configuration_layout(
             header_indexes,
             _configuration_contingency_header(favorecido),
         )
-        for configured_distributor, favorecido in _CONFIGURABLE_CONTINGENCY_COEFFICIENTS
-        if configured_distributor == distributor_name
+        for favorecido in _configurable_contingency_favorecidos_for_distributor(
+            distributor_name
+        )
     }
     coefficient_indexes = {
         favorecido: _configuration_index(
@@ -2800,13 +2835,17 @@ def _sync_rateio_configuration_layout(
                 )
             )
 
-        for configured_distributor, favorecido in _CONFIGURABLE_CONTINGENCY_COEFFICIENTS:
-            if configured_distributor != distributor_name:
-                continue
+        for favorecido in _configurable_contingency_favorecidos_for_distributor(
+            distributor_name
+        ):
             header = _configuration_contingency_header(favorecido)
             if header in headers:
                 default_contingency_coef = _format_decimal_plain(
-                    _default_contingency_coefficient(distributor_name, favorecido)
+                    _default_contingency_coefficient_for_month(
+                        distributor_name,
+                        favorecido,
+                        rateio_month,
+                    )
                 )
                 values_by_header[header] = contingency_by_month.get(
                     (rateio_month, favorecido),
@@ -3751,6 +3790,14 @@ def _sync_generation_total_tabs() -> None:
             changed_rows,
         )
 
+def _normalize_projection_uc_key(value) -> str:
+    """Normalize projection matches without changing stored/displayed UCs."""
+    uc = normalize_uc(value)
+    if uc.isdigit():
+        return uc.lstrip("0") or "0"
+    return uc
+
+
 def _build_projection_index() -> dict[tuple[str, str], str]:
     if not PROJECTION_SPREADSHEET_ID.strip():
         return {}
@@ -3767,7 +3814,7 @@ def _build_projection_index() -> dict[tuple[str, str], str]:
         if len(row) <= 5:
             continue
 
-        uc = normalize_uc(row[2] if len(row) > 2 else "")
+        uc = _normalize_projection_uc_key(row[2] if len(row) > 2 else "")
         month_ref = _normalize_month_reference(row[5] if len(row) > 5 else "")
         value_g = _round_projection_value(row[6] if len(row) > 6 else "")
         value_h = _round_projection_value(row[7] if len(row) > 7 else "")
@@ -3795,7 +3842,10 @@ def _inject_projection_value(
     proj_value = ""
     candidates = lookup_ucs or [uc]
     for candidate in candidates:
-        proj_value = projection_index.get((normalize_uc(candidate), month_ref), "")
+        proj_value = projection_index.get(
+            (_normalize_projection_uc_key(candidate), month_ref),
+            "",
+        )
         if str(proj_value).strip():
             break
     enriched = dict(payload)
@@ -3812,7 +3862,12 @@ def _new_rateio_consumption_for_alteracao_month(
     """Projection used only by Novo Rateio (M): UC + Alteracao Rateio para o mes."""
     month_ref = _normalize_month_reference_any(rateio_month)
     if projection_index and uc and month_ref:
-        projected = _to_decimal(projection_index.get((normalize_uc(uc), month_ref), ""))
+        projected = _to_decimal(
+            projection_index.get(
+                (_normalize_projection_uc_key(uc), month_ref),
+                "",
+            )
+        )
         if projected is not None:
             return projected
     return fallback
@@ -4329,6 +4384,7 @@ def full_sync() -> None:
             _required_goal_months_for_rows(
                 rows_by_target[target],
                 frozen_months_by_distributor[distributor],
+                distributor=distributor,
             ),
             sheet_label=target_label,
         )
@@ -4680,6 +4736,11 @@ def delta_sync(last_updated_ts: int) -> int:
                     current_month=current_month,
                     frozen_rateio_months=frozen_months_by_distributor[distributor],
                 )
+            else:
+                effective_rows = _apply_updates_to_existing_rows(
+                    rows_by_target.get(target, []),
+                    updates,
+                )
             goals = _run_sheets_step_with_retry(
                 f"Preflight metas geracao delta [{target_label}]",
                 lambda sid=ws.spreadsheet_id, fav=favorecido: _load_generation_projection_goal_by_month(
@@ -4689,9 +4750,11 @@ def delta_sync(last_updated_ts: int) -> int:
             )
             _validate_generation_goals(
                 goals,
-                _required_goal_months_for_reference_months(
-                    impacted_months_by_target[target],
+                _required_goal_months_for_rows(
+                    effective_rows,
                     frozen_months_by_distributor[distributor],
+                    distributor=distributor,
+                    reference_months=impacted_months_by_target[target],
                 ),
                 sheet_label=target_label,
             )
