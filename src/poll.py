@@ -3791,11 +3791,15 @@ def _sync_generation_total_tabs() -> None:
         )
 
 def _normalize_projection_uc_key(value) -> str:
-    """Normalize projection matches without changing stored/displayed UCs."""
-    uc = normalize_uc(value)
-    if uc.isdigit():
-        return uc.lstrip("0") or "0"
-    return uc
+    """Normalize projection lookup keys without changing stored/displayed UCs."""
+    if value is None:
+        return ""
+
+    text = unicodedata.normalize("NFKC", str(value)).strip()
+    digits = "".join(ch for ch in text if ch.isdecimal())
+    if not digits:
+        return ""
+    return digits.lstrip("0") or "0"
 
 
 def _build_projection_index() -> dict[tuple[str, str], str]:
@@ -4179,6 +4183,143 @@ def _is_blank_rateio_row(row: list | None) -> bool:
     return not any(str(value or "").strip() for value in list(row or [])[:_RATEIO_WRITE_COL_COUNT])
 
 
+def _open_reference_months_for_recalculation(
+    rows: list[list],
+    frozen_rateio_months: set[str] | None = None,
+) -> set[str]:
+    months: set[str] = set()
+    for row in rows:
+        uc = normalize_uc(row[3] if len(row) > 3 else "")
+        month_ref = _normalize_month_reference_any(row[6] if len(row) > 6 else "")
+        rateio_month = _normalize_month_reference_any(row[0] if row else "")
+        if not uc or not month_ref or not rateio_month:
+            continue
+        if _is_rateio_month_frozen(rateio_month, frozen_rateio_months):
+            continue
+        months.add(month_ref)
+    return months
+
+
+def _recalculate_all_rateio_targets_for_delta(
+    *,
+    current_month: int,
+    projection_index: dict[tuple[str, str], str] | None = None,
+    last_rateio_index_by_distributor: dict[str, dict[tuple[str, str], str]] | None = None,
+    frozen_months_by_distributor: dict[str, set[str]] | None = None,
+) -> tuple[int, int, int]:
+    """Recalculate K/L/M for every target tab during each delta cycle."""
+    projection = projection_index if projection_index is not None else _build_projection_index()
+    last_rateio_indexes = (
+        last_rateio_index_by_distributor
+        if last_rateio_index_by_distributor is not None
+        else {
+            distributor: _run_sheets_step_with_retry(
+                f"Historico ultimo rateio {distributor} (delta global)",
+                lambda distributor_name=distributor: _build_distributor_last_rateio_index(
+                    distributor_name
+                ),
+            )
+            for distributor in TARGET_SHEET_TABS
+        }
+    )
+    frozen_months = (
+        frozen_months_by_distributor
+        if frozen_months_by_distributor is not None
+        else {
+            distributor: _run_sheets_step_with_retry(
+                f"Configuracao delta global [{distributor}]",
+                lambda sid=resolve_rateio_sheet_target(distributor)[0]: _load_frozen_rateio_months(
+                    sid
+                ),
+            )
+            for distributor in TARGET_SHEET_TABS
+        }
+    )
+
+    total_k = 0
+    total_l = 0
+    total_m = 0
+
+    for distributor, favorecido in _RATEIO_TARGETS:
+        spreadsheet_id, target_tab_name = resolve_rateio_sheet_target(
+            distributor,
+            favorecido,
+        )
+        target_label = f"{distributor} / {favorecido}"
+        frozen_rateio_months = frozen_months.get(distributor, set())
+
+        def _load_target_rows():
+            ws_local = get_worksheet(
+                target_tab_name,
+                spreadsheet_id=spreadsheet_id,
+                create_if_missing=False,
+            )
+            ensure_headers(ws_local)
+            _ensure_invoice_issue_day_header(ws_local, spreadsheet_id=spreadsheet_id)
+            rows_local = read_all_rows(ws_local, spreadsheet_id=spreadsheet_id)
+            return ws_local, rows_local
+
+        ws, rows = _run_sheets_step_with_retry(
+            f"Estado rateio delta global [{target_label}]",
+            _load_target_rows,
+        )
+        reference_months = _open_reference_months_for_recalculation(
+            rows,
+            frozen_rateio_months,
+        )
+        if not reference_months:
+            continue
+
+        goals = _run_sheets_step_with_retry(
+            f"Preflight metas geracao delta global [{target_label}]",
+            lambda sid=spreadsheet_id, fav=favorecido: _load_generation_projection_goal_by_month(
+                sid,
+                fav,
+            ),
+        )
+        _validate_generation_goals(
+            goals,
+            _required_goal_months_for_rows(
+                rows,
+                frozen_rateio_months,
+                distributor=distributor,
+                reference_months=reference_months,
+            ),
+            sheet_label=target_label,
+        )
+        target_last_rateio_index = _last_rateio_index_for_distributor(
+            distributor,
+            {},
+            last_rateio_indexes,
+        )
+        k_changes, l_changes, m_changes = _run_sheets_step_with_retry(
+            f"Recalculo K/L/M delta global [{target_label}]",
+            lambda ws_local=ws, sid=spreadsheet_id, fav=favorecido, months=reference_months, g=goals, j_idx=target_last_rateio_index, frozen=frozen_rateio_months: _recalculate_k_l_m_for_months(
+                ws_local,
+                spreadsheet_id=sid,
+                favorecido=fav,
+                months=months,
+                current_month=current_month,
+                monthly_goals=g,
+                last_rateio_index=j_idx,
+                frozen_rateio_months=frozen,
+                projection_index=projection,
+            ),
+        )
+        total_k += k_changes
+        total_l += l_changes
+        total_m += m_changes
+        logger.info(
+            "Delta ClickUp: aba '%s' K=%d, L=%d, M=%d linhas recalculadas (global)",
+            ws.title,
+            k_changes,
+            l_changes,
+            m_changes,
+        )
+
+    return total_k, total_l, total_m
+
+
 def full_sync() -> None:
     global _known_task_ids
     stats.reset()
@@ -4489,6 +4630,10 @@ def delta_sync(last_updated_ts: int) -> int:
     global _known_task_ids
     stats.reset()
     now_ms = int(time.time() * 1000)
+    current_month = get_current_reference_month()
+    projection_index: dict[tuple[str, str], str] | None = None
+    last_rateio_index_by_distributor: dict[str, dict[tuple[str, str], str]] | None = None
+    frozen_months_by_distributor: dict[str, set[str]] | None = None
 
     # A projecao de geracao muda independentemente das tasks do ClickUp.
     # Sincronize-a em todo delta antes de carregar as metas usadas nos calculos.
@@ -4501,6 +4646,7 @@ def delta_sync(last_updated_ts: int) -> int:
     )
 
     if not tasks:
+        _recalculate_all_rateio_targets_for_delta(current_month=current_month)
         _sync_all_formularios()
         log_sync_stats("DELTA SYNC (sem alteracoes)")
         return now_ms
@@ -4759,36 +4905,10 @@ def delta_sync(last_updated_ts: int) -> int:
                 sheet_label=target_label,
             )
             update_rows_in_place(ws, updates, col_count=_RATEIO_WRITE_COL_COUNT)
-            target_last_rateio_index = _last_rateio_index_for_distributor(
-                distributor,
-                {},
-                last_rateio_index_by_distributor,
-            )
-            k_changes, l_changes, m_changes = _run_sheets_step_with_retry(
-                f"Recalculo K/L/M delta [{target_label}]",
-                lambda ws_local=ws, sid=ws.spreadsheet_id, fav=favorecido, months=impacted_months_by_target[target], g=goals, j_idx=target_last_rateio_index, current=current_month, frozen=frozen_months_by_distributor[distributor], proj=projection_index: _recalculate_k_l_m_for_months(
-                    ws_local,
-                    spreadsheet_id=sid,
-                    favorecido=fav,
-                    months=months,
-                    current_month=current,
-                    monthly_goals=g,
-                    last_rateio_index=j_idx,
-                    frozen_rateio_months=frozen,
-                    projection_index=proj,
-                ),
-            )
             logger.info(
                 "Delta ClickUp: aba '%s' atualizada em %d linhas",
                 ws.title,
                 len(updates),
-            )
-            logger.info(
-                "Delta ClickUp: aba '%s' K=%d, L=%d, M=%d linhas recalculadas",
-                ws.title,
-                k_changes,
-                l_changes,
-                m_changes,
             )
 
         if updated_rows:
@@ -4883,6 +5003,13 @@ def delta_sync(last_updated_ts: int) -> int:
                 "Delta ClickUp: %d tasks novas ignoradas por Plano de Adesao SEM FATURAMENTO.",
                 with_excluded_plan,
             )
+
+    _recalculate_all_rateio_targets_for_delta(
+        current_month=current_month,
+        projection_index=projection_index,
+        last_rateio_index_by_distributor=last_rateio_index_by_distributor,
+        frozen_months_by_distributor=frozen_months_by_distributor,
+    )
 
     _sync_all_formularios()
 
