@@ -375,17 +375,18 @@ def _prioritize_tasks_by_uc(tasks: list[dict]) -> list[dict]:
 
     for task in tasks:
         uc = extract_task_uc(task)
-        if not uc:
+        uc_key = _normalize_uc_match_key(uc)
+        if not uc_key:
             without_uc.append(task)
             continue
 
-        current = selected_by_uc.get(uc)
+        current = selected_by_uc.get(uc_key)
         if current is None:
-            selected_by_uc[uc] = task
+            selected_by_uc[uc_key] = task
             continue
 
         if _task_priority_key(task) > _task_priority_key(current):
-            selected_by_uc[uc] = task
+            selected_by_uc[uc_key] = task
 
     prioritized = list(selected_by_uc.values()) + without_uc
     discarded = len(tasks) - len(prioritized)
@@ -1150,7 +1151,7 @@ def _apply_k_l_m_targets(
         adjustable_rows: list[dict] = []
 
         for r in month_rows:
-            uc_key = _normalize_uc_key(r.get("uc", ""))
+            uc_key = _normalize_uc_match_key(r.get("uc", ""))
             month_ref_norm = _normalize_month_reference_any(r.get("month_ref", ""))
             key = (uc_key, month_ref_norm)
             prev_key = (uc_key, _previous_month_reference(month_ref_norm))
@@ -1283,7 +1284,7 @@ def _apply_k_l_m_targets(
         def _matches_remainder_rule(rr: dict, rule: dict[str, str | Decimal]) -> bool:
             remainder_uc = str(rule.get("remainder_uc") or "").strip()
             if remainder_uc:
-                return _normalize_uc_key(rr.get("uc", "")) == _normalize_uc_key(remainder_uc)
+                return _normalize_uc_match_key(rr.get("uc", "")) == _normalize_uc_match_key(remainder_uc)
 
             remainder_favorecido = str(rule.get("remainder_favorecido") or "").strip()
             if remainder_favorecido:
@@ -1470,7 +1471,7 @@ def _apply_k_l_m_targets(
             else:
                 rr["_m_int"] = Decimal(_decimal_to_int_half_up(rr.get("m_target", Decimal("0"))))
                 rr["m_target"] = rr["_m_int"]
-            uc_key = _normalize_uc_key(rr.get("uc", ""))
+            uc_key = _normalize_uc_match_key(rr.get("uc", ""))
             month_ref_norm = _normalize_month_reference_any(rr.get("month_ref", ""))
             rateio_month_norm = _normalize_month_reference_any(rr.get("rateio_month", ""))
             if not rr.get("excluded_from_shared_rateio") and uc_key and rateio_month_norm:
@@ -1601,7 +1602,7 @@ def _recalculate_k_l_m_with_monthly_goal(
             val_i = _to_decimal(i_raw)
             i_has_value = str(i_raw).strip() != ""
             current_j = str(row[9] if len(row) > 9 else "").strip()
-            uc_key = _normalize_uc_key(uc)
+            uc_key = _normalize_uc_match_key(uc)
             val_j = _to_decimal(current_j)
             current_k = str(row[10] if len(row) > 10 else "").strip()
             current_k_num = _to_decimal(current_k)
@@ -1852,7 +1853,7 @@ def _recalculate_k_l_m_for_months(
         uc = normalize_uc(row[3] if len(row) > 3 else "")
         razao_social = str(row[5] if len(row) > 5 else "").strip()
         month_ref = str(row[6] if len(row) > 6 else "").strip()
-        uc_key_all = _normalize_uc_key(uc)
+        uc_key_all = _normalize_uc_match_key(uc)
         month_ref_norm = _normalize_month_reference_any(month_ref)
         rateio_month_norm = _normalize_month_reference_any(rateio_month)
         existing_m = _to_decimal(row[12] if len(row) > 12 else "")
@@ -2076,6 +2077,47 @@ def _normalize_uc_key(value) -> str:
     return raw.upper()
 
 
+def _digits_only(value) -> str:
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    raw_s = str(value or "").strip()
+    if raw_s.endswith(".0") and raw_s.replace(".", "", 1).isdigit():
+        raw_s = raw_s[:-2]
+    text = unicodedata.normalize("NFKC", raw_s)
+    return "".join(str(unicodedata.digit(ch)) for ch in text if ch.isdecimal())
+
+
+def _normalize_uc_match_key(value) -> str:
+    digits = _digits_only(value)
+    if not digits:
+        return ""
+    return digits.lstrip("0") or "0"
+
+
+def _uc_lookup_keys(value) -> list[str]:
+    keys: list[str] = []
+    digit_key = _normalize_uc_match_key(value)
+    if digit_key:
+        keys.append(digit_key)
+
+    # Legacy fallback is only useful for UC-like values. Avoid indexing random
+    # non-numeric text that may exist in malformed custom fields.
+    if _digits_only(value):
+        legacy_key = _normalize_uc_key(value)
+        if legacy_key and legacy_key not in keys:
+            keys.append(legacy_key)
+    return keys
+
+
+def _task_uc_lookup_keys(task: dict) -> list[str]:
+    keys: list[str] = []
+    for candidate in extract_task_uc_match_candidates(task) or [extract_task_uc(task)]:
+        for key in _uc_lookup_keys(candidate):
+            if key and key not in keys:
+                keys.append(key)
+    return keys
+
+
 def _extract_uc_from_client_name(value) -> str:
     text = str(value or "")
     if not text.strip():
@@ -2083,7 +2125,7 @@ def _extract_uc_from_client_name(value) -> str:
     m = re.search(r"\bUC\s*([0-9]+)\b", text, flags=re.IGNORECASE)
     if not m:
         return ""
-    return _normalize_uc_key(m.group(1))
+    return _normalize_uc_match_key(m.group(1))
 
 
 def _normalize_month_reference_any(value) -> str:
@@ -3018,7 +3060,7 @@ def _build_last_rateio_index_from_rows(
             row[month_col] if len(row) > month_col else ""
         )
         value = _round_projection_value(row[value_col] if len(row) > value_col else "")
-        uc_key = _normalize_uc_key(row[uc_col] if len(row) > uc_col else "")
+        uc_key = _normalize_uc_match_key(row[uc_col] if len(row) > uc_col else "")
         if not uc_key or not month_ref or not str(value).strip():
             skipped += 1
             continue
@@ -3161,11 +3203,11 @@ def _fetch_clickup_tasks_from_lists(
 
 def _build_formulario_copel_field_by_uc(tasks: list[dict], field_id: str) -> dict[str, str]:
     result: dict[str, str] = {}
-    for task in sorted(_prioritize_tasks_by_uc(tasks), key=_task_priority_key):
-        uc = extract_task_uc(task)
-        uc_key = _normalize_uc_key(uc)
-        if uc_key:
-            result[uc_key] = _clickup_custom_field_to_text(task, field_id)
+    for task in sorted(tasks, key=_task_priority_key):
+        value = _clickup_custom_field_to_text(task, field_id)
+        for uc_key in _task_uc_lookup_keys(task):
+            if value or uc_key not in result:
+                result[uc_key] = value
     return result
 
 
@@ -3214,10 +3256,11 @@ def _build_formulario_address(task: dict) -> str:
 
 def _build_formulario_address_by_uc(tasks: list[dict]) -> dict[str, str]:
     result: dict[str, str] = {}
-    for task in sorted(_prioritize_tasks_by_uc(tasks), key=_task_priority_key):
-        uc_key = _normalize_uc_key(extract_task_uc(task))
-        if uc_key:
-            result[uc_key] = _build_formulario_address(task)
+    for task in sorted(tasks, key=_task_priority_key):
+        address = _build_formulario_address(task)
+        for uc_key in _task_uc_lookup_keys(task):
+            if address or uc_key not in result:
+                result[uc_key] = address
     return result
 
 
@@ -3333,6 +3376,13 @@ def _build_formulario_copel_rows(
         index = column_indexes[field]
         return row[index] if len(row) > index else ""
 
+    def _lookup_by_uc(index: dict[str, str], uc_value) -> str:
+        for key in _uc_lookup_keys(uc_value):
+            value = index.get(key, "")
+            if str(value or "").strip():
+                return value
+        return ""
+
     for source_row in rateio_rows:
         row = list(source_row or [])
         source_usina = _source_value(row, "usina")
@@ -3353,19 +3403,18 @@ def _build_formulario_copel_rows(
         if not any(str(value or "").strip() for value in mapped_values):
             continue
 
-        uc_key = _normalize_uc_key(source_uc)
         project_key = _formulario_copel_project_key(source_usina)
-        razao_social = razao_social_by_uc.get(uc_key, "") or source_razao_social
+        razao_social = _lookup_by_uc(razao_social_by_uc, source_uc) or source_razao_social
         output_row = [
             razao_social,
-            cpf_cnpj_by_uc.get(uc_key, ""),
+            _lookup_by_uc(cpf_cnpj_by_uc, source_uc),
             source_uc,
             source_percentual,
             uc_by_project_name.get(project_key, ""),
             source_usina,
             source_alteracao,
-            col_h_by_uc.get(uc_key, "") or source_uc_aneel,
-            address_by_uc.get(uc_key, ""),
+            _lookup_by_uc(col_h_by_uc, source_uc) or source_uc_aneel,
+            _lookup_by_uc(address_by_uc, source_uc),
             uc_aneel_by_project_name.get(project_key, ""),
         ]
         rows.append(output_row)
@@ -3714,7 +3763,7 @@ def _build_generation_rows_by_tab() -> dict[str, list[list[str]]]:
             key=lambda r: (
                 _normalize_text(r[0]),
                 _normalize_month_reference(r[3]),
-                normalize_uc(r[2]),
+                _normalize_uc_match_key(r[2]),
             )
         )
 
@@ -3792,14 +3841,7 @@ def _sync_generation_total_tabs() -> None:
 
 def _normalize_projection_uc_key(value) -> str:
     """Normalize projection lookup keys without changing stored/displayed UCs."""
-    if value is None:
-        return ""
-
-    text = unicodedata.normalize("NFKC", str(value)).strip()
-    digits = "".join(ch for ch in text if ch.isdecimal())
-    if not digits:
-        return ""
-    return digits.lstrip("0") or "0"
+    return _normalize_uc_match_key(value)
 
 
 def _build_projection_index() -> dict[tuple[str, str], str]:
@@ -3920,7 +3962,11 @@ def _latest_powerrev_invoice_issue_for_month(
     *,
     lookup_ucs: list[str] | None = None,
 ) -> str:
-    candidates = [normalize_uc(candidate) for candidate in (lookup_ucs or [uc]) if normalize_uc(candidate)]
+    candidates = [
+        normalized
+        for candidate in (lookup_ucs or [uc])
+        if (normalized := _normalize_uc_match_key(candidate))
+    ]
     if not candidates:
         return ""
 
@@ -3954,7 +4000,9 @@ def _build_open_month_payload(
     previous_month = _previous_month_int(month)
     previous_invoice = {}
     for candidate in lookup_ucs or [uc]:
-        previous_invoice = invoice_by_month.get(previous_month, {}).get(normalize_uc(candidate)) or {}
+        previous_invoice = invoice_by_month.get(previous_month, {}).get(
+            _normalize_uc_match_key(candidate)
+        ) or {}
         if previous_invoice:
             break
     issue_value = _latest_powerrev_invoice_issue_for_month(
@@ -4006,7 +4054,7 @@ def _load_sheet_state() -> tuple[
         for i, row in enumerate(rows):
             if len(row) <= max(uc_col, month_col):
                 continue
-            uc = normalize_uc(row[uc_col])
+            uc = _normalize_uc_match_key(row[uc_col])
             month_ref = _normalize_month_reference(row[month_col])
             if uc and month_ref:
                 uc_month_rows[(uc, month_ref)] = i + DATA_START_ROW
@@ -4046,7 +4094,7 @@ def _merge_frozen_and_open_rows(
     frozen_count = 0
     for raw_row in existing_rows:
         row = list(raw_row or [])
-        uc_key = _normalize_uc_key(row[uc_idx] if uc_idx < len(row) else "")
+        uc_key = _normalize_uc_match_key(row[uc_idx] if uc_idx < len(row) else "")
         month_ref = row[month_idx] if month_idx < len(row) else ""
         if not uc_key or not _is_reference_month_frozen(
             month_ref,
@@ -4062,7 +4110,7 @@ def _merge_frozen_and_open_rows(
 
     for raw_row in open_rows:
         row = list(raw_row or [])
-        uc_key = _normalize_uc_key(row[uc_idx] if uc_idx < len(row) else "")
+        uc_key = _normalize_uc_match_key(row[uc_idx] if uc_idx < len(row) else "")
         month_ref = row[month_idx] if month_idx < len(row) else ""
         if not uc_key or _is_reference_month_frozen(
             month_ref,
@@ -4104,7 +4152,7 @@ def _build_open_row_updates(
     for offset, raw_row in enumerate(existing_rows):
         sheet_row = DATA_START_ROW + offset
         row = list(raw_row or [])
-        uc_key = _normalize_uc_key(row[uc_idx] if uc_idx < len(row) else "")
+        uc_key = _normalize_uc_match_key(row[uc_idx] if uc_idx < len(row) else "")
         month_ref = _normalize_month_reference(
             row[month_idx] if month_idx < len(row) else ""
         )
@@ -4129,7 +4177,7 @@ def _build_open_row_updates(
             row.extend([""] * (_RATEIO_WRITE_COL_COUNT - len(row)))
         row = row[:_RATEIO_WRITE_COL_COUNT]
 
-        uc_key = _normalize_uc_key(row[uc_idx] if uc_idx < len(row) else "")
+        uc_key = _normalize_uc_match_key(row[uc_idx] if uc_idx < len(row) else "")
         month_ref = _normalize_month_reference(
             row[month_idx] if month_idx < len(row) else ""
         )
@@ -4189,7 +4237,7 @@ def _open_reference_months_for_recalculation(
 ) -> set[str]:
     months: set[str] = set()
     for row in rows:
-        uc = normalize_uc(row[3] if len(row) > 3 else "")
+        uc = _normalize_uc_match_key(row[3] if len(row) > 3 else "")
         month_ref = _normalize_month_reference_any(row[6] if len(row) > 6 else "")
         rateio_month = _normalize_month_reference_any(row[0] if row else "")
         if not uc or not month_ref or not rateio_month:
@@ -4727,7 +4775,14 @@ def delta_sync(last_updated_ts: int) -> int:
             for month in months_window:
                 month_ref = format_reference_month(month)
                 rateio_month = format_reference_month(_add_months(month, 1))
-                keys = [(candidate, month_ref) for candidate in lookup_ucs]
+                keys = [
+                    (key, month_ref)
+                    for key in (
+                        _normalize_uc_match_key(candidate)
+                        for candidate in lookup_ucs
+                    )
+                    if key
+                ]
                 if distributor in TARGET_SHEET_TABS and favorecido_original is not None:
                     favorecido = _resolve_effective_favorecido_for_rateio_month(
                         task=task,

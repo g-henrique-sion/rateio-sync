@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -79,10 +80,19 @@ _BATCH_JOB_FAILED_STATUSES = {"failed", "error", "canceled", "cancelled"}
 
 
 def _normalize_uc(value) -> str:
-    """Normalize UC for matching (remove '-' and trim)."""
+    """Normalize UC for matching without depending on punctuation or leading zeroes."""
     if value is None:
         return ""
-    return str(value).strip().replace("-", "")
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    raw_s = str(value).strip()
+    if raw_s.endswith(".0") and raw_s.replace(".", "", 1).isdigit():
+        raw_s = raw_s[:-2]
+    text = unicodedata.normalize("NFKC", raw_s)
+    digits = "".join(str(unicodedata.digit(ch)) for ch in text if ch.isdecimal())
+    if not digits:
+        return ""
+    return digits.lstrip("0") or "0"
 
 
 def _format_reference_month(value) -> str:
