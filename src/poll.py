@@ -1041,14 +1041,38 @@ def _validate_generation_goals(
     *,
     sheet_label: str,
 ) -> None:
-    missing = sorted(
-        month for month in required_months if month not in goals
-    )
+    missing = _missing_generation_goal_months(goals, required_months)
     if missing:
         raise RuntimeError(
             f"Rateio '{sheet_label}' sem metas de geracao validadas para: "
             + ", ".join(missing)
         )
+
+
+def _missing_generation_goal_months(
+    goals: dict[str, Decimal],
+    required_months: set[str],
+) -> list[str]:
+    return sorted(month for month in required_months if month not in goals)
+
+
+def _warn_missing_generation_goals(
+    goals: dict[str, Decimal],
+    required_months: set[str],
+    *,
+    sheet_label: str,
+) -> list[str]:
+    missing = _missing_generation_goal_months(goals, required_months)
+    if missing:
+        logger.warning(
+            (
+                "Rateio '%s' sem metas de geracao validadas para: %s. "
+                "O sync continuara; L/M ficarao em branco nesses meses."
+            ),
+            sheet_label,
+            ", ".join(missing),
+        )
+    return missing
 
 
 def _required_goal_months_for_rows(
@@ -1217,10 +1241,24 @@ def _apply_k_l_m_targets(
         shared_rows = fixed_rows + adjustable_rows
         goal = goals.get(rateio_month)
         if shared_rows and goal is None:
-            raise RuntimeError(
-                f"Rateio '{sheet_label}' alteracao {rateio_month} "
-                f"(referencia {reference_label}) sem meta de geracao validada."
+            logger.warning(
+                (
+                    "Rateio '%s' alteracao %s (referencia %s): sem meta de geracao "
+                    "validada; L/M nao serao recalculados para este mes."
+                ),
+                sheet_label,
+                rateio_month,
+                reference_label,
             )
+            for rr in month_rows:
+                rr["l_target"] = ""
+                rr["m_target"] = ""
+                rr["_m_int"] = Decimal("0")
+                uc_key = _normalize_uc_match_key(rr.get("uc", ""))
+                month_ref_norm = _normalize_month_reference_any(rr.get("month_ref", ""))
+                if uc_key and month_ref_norm:
+                    k_by_key[(uc_key, month_ref_norm)] = rr.get("k_target", Decimal("0"))
+            continue
         goal_value = goal if goal is not None else Decimal("0")
         goal_int = Decimal(max(int(goal_value), 0))
 
@@ -4325,7 +4363,7 @@ def _recalculate_all_rateio_targets_for_delta(
                 fav,
             ),
         )
-        _validate_generation_goals(
+        _warn_missing_generation_goals(
             goals,
             _required_goal_months_for_rows(
                 rows,
@@ -4568,7 +4606,7 @@ def full_sync() -> None:
                 fav,
             ),
         )
-        _validate_generation_goals(
+        _warn_missing_generation_goals(
             goals,
             _required_goal_months_for_rows(
                 rows_by_target[target],
@@ -4949,7 +4987,7 @@ def delta_sync(last_updated_ts: int) -> int:
                     fav,
                 ),
             )
-            _validate_generation_goals(
+            _warn_missing_generation_goals(
                 goals,
                 _required_goal_months_for_rows(
                     effective_rows,
