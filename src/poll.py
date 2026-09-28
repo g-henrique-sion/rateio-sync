@@ -56,6 +56,9 @@ from src.clients.sheets_manager import (
     _values_batch_get,
     _values_batch_update,
     _values_update,
+    _range_a1,
+    _resize_columns,
+    _resize_rows,
     reset_client as reset_sheets_client,
 )
 from src.core.row_builder import (
@@ -71,6 +74,8 @@ from src.core.row_builder import (
     extract_task_favorecido,
     extract_task_invoice_issue_day,
     extract_task_uc_aneel,
+    extract_task_tensao,
+    extract_task_uc_ancora,
     normalize_uc,
 )
 from src.core.field_map import FIELD_MAP, COLUMN_ORDER, get_headers, TARGET_SHEET_TABS
@@ -171,7 +176,7 @@ _FORMULARIO_RATEIO_HEADER_ALIASES = {
         "ALTERACAO RATEIO PARA O MES",
     },
 }
-_RATEIO_WRITE_COL_COUNT = 16  # A:P
+_RATEIO_WRITE_COL_COUNT = 18  # A:R
 _INVOICE_ISSUE_DAY_OUTPUT_COL_INDEX = 13  # N
 _INVOICE_ISSUE_DAY_HEADER = "Dia de emiss\u00e3o da fatura da distribuidora"
 _FAVORECIDO_OUTPUT_COL_INDEX = 14  # O
@@ -179,6 +184,10 @@ _FAVORECIDO_HEADER = "Favorecido"
 _UC_ANEEL_OUTPUT_COL_INDEX = 15  # P
 _UC_ANEEL_HEADER = "UC Aneel"
 _UC_ANEEL_MISSING_VALUE = "Sem UC Aneel"
+_TENSAO_OUTPUT_COL_INDEX = 16  # Q
+_TENSAO_HEADER = "Tensão"
+_UC_ANCORA_OUTPUT_COL_INDEX = 17  # R
+_UC_ANCORA_HEADER = "UC Âncora"
 _COPEL_SHARED_RATEIO_EXCLUDED_RAZAO_SOCIAIS = (
     "MONTE SIAO COOPERATIVA DE ENERGIA",
 )
@@ -186,6 +195,12 @@ _RATEIO_CONFIGURATION_TAB = "Configura\u00e7\u00e3o"
 _RATEIO_CONFIGURATION_CLOSED_STATUS = "fechado"
 _SHEETS_SERIAL_BASE = date(1899, 12, 30)
 _RATEIO_FAVORECIDOS_BY_DISTRIBUTOR = {
+    "COPEL": ("Sion - Matriz",),
+    "Energisa MS": ("Sion - Matriz", "Sion - Helexia MS"),
+    "CELESC": ("Sion - Matriz",),
+    "AmE": ("Sion - Matriz",),
+}
+_GENERATION_FAVORECIDOS_BY_DISTRIBUTOR = {
     "COPEL": ("Sion - Matriz", "Sion - Helexia PR"),
     "Energisa MS": ("Sion - Matriz", "Sion - Helexia MS"),
     "CELESC": ("Sion - Matriz",),
@@ -205,44 +220,20 @@ _GENERATION_TOTAL_MONTH_COL_INDEX = 12
 _RATEIO_CONFIGURATION_MONTH_HEADER = "Alteracao Rateio para o mes"
 _RATEIO_CONFIGURATION_STATUS_HEADER = "Status"
 _RATEIO_CONFIGURATION_SPECIAL_BASE_HEADER = "Coeficiente base especial"
-_RATEIO_CONFIGURATION_REMAINDER_FAVORECIDO_HEADER = "Sobra para Favorecido"
 _RATEIO_CONFIGURATION_REMAINDER_UC_HEADER = "Sobra para UC"
 _RATEIO_CONFIGURATION_CONTINGENCY_PREFIX = "Coeficiente Contingencia"
-_RATEIO_CONFIGURATION_LEGACY_HEADERS = [
-    _RATEIO_CONFIGURATION_MONTH_HEADER,
-    "Coeficiente Sion - Matriz",
-    "Coeficiente Sion - Helexia PR",
-    "Coeficiente Sion - Helexia MS",
-    _RATEIO_CONFIGURATION_STATUS_HEADER,
-    _RATEIO_CONFIGURATION_SPECIAL_BASE_HEADER,
-    _RATEIO_CONFIGURATION_REMAINDER_FAVORECIDO_HEADER,
-    _RATEIO_CONFIGURATION_REMAINDER_UC_HEADER,
-]
 _RATEIO_CONFIGURATION_FAVORECIDOS = [
-    "Sion - Matriz",
     "Sion - Helexia PR",
     "Sion - Helexia MS",
 ]
 _MAX_SPECIAL_BASE_COEFFICIENT = Decimal("100")
 _SPECIAL_ALLOCATION_DEFAULTS = {
-    ("COPEL", "Sion - Matriz"): {
-        "remainder_favorecido": "Sion - Helexia PR",
-        "remainder_uc": "",
-    },
     ("Energisa MS", "Sion - Helexia MS"): {
-        "remainder_favorecido": "",
         "remainder_uc": "10/3713101-8",
     },
 }
 _CONFIGURABLE_CONTINGENCY_COEFFICIENTS = set(_RATEIO_TARGETS)
-_FIXED_CONTINGENCY_COEFFICIENTS_BY_MONTH = {
-    ("COPEL", "Sion - Matriz"): {
-        "01-08-2026": Decimal("0.00000000"),
-    },
-}
-_HELEXIA_PR_MATRIZ_SOURCE_DISTRIBUTOR = "COPEL"
-_HELEXIA_PR_MATRIZ_SOURCE_FAVORECIDO = "Sion - Helexia PR"
-_HELEXIA_PR_MATRIZ_TARGET_FAVORECIDO = "Sion - Matriz"
+_FIXED_CONTINGENCY_COEFFICIENTS_BY_MONTH = {}
 _DEFAULT_HISTORY_INVOICE_ISSUE_DAY_THRESHOLD = 10
 _AME_HISTORY_INVOICE_ISSUE_DAY_THRESHOLD = 7
 
@@ -370,7 +361,7 @@ def _task_priority_key(task: dict) -> tuple[int, int]:
 
 
 def _prioritize_tasks_by_uc(tasks: list[dict]) -> list[dict]:
-    selected_by_uc: dict[str, dict] = {}
+    selected_by_uc: dict[tuple[str, str, str], dict] = {}
     without_uc: list[dict] = []
 
     for task in tasks:
@@ -380,19 +371,23 @@ def _prioritize_tasks_by_uc(tasks: list[dict]) -> list[dict]:
             without_uc.append(task)
             continue
 
-        current = selected_by_uc.get(uc_key)
+        distributor = str(extract_task_target_tab(task) or "").strip()
+        favorecido = _resolve_supported_favorecido(extract_task_favorecido(task)) or ""
+        allocation_favorecido = _rateio_allocation_favorecido(distributor, favorecido)
+        key = (distributor, allocation_favorecido, uc_key)
+        current = selected_by_uc.get(key)
         if current is None:
-            selected_by_uc[uc_key] = task
+            selected_by_uc[key] = task
             continue
 
         if _task_priority_key(task) > _task_priority_key(current):
-            selected_by_uc[uc_key] = task
+            selected_by_uc[key] = task
 
     prioritized = list(selected_by_uc.values()) + without_uc
     discarded = len(tasks) - len(prioritized)
     if discarded > 0:
         logger.info(
-            "ClickUp: %d tasks duplicadas por UC descartadas por prioridade de status.",
+            "ClickUp: %d tasks duplicadas por distribuidora, Favorecido e UC descartadas por prioridade de status.",
             discarded,
         )
     return prioritized
@@ -466,9 +461,10 @@ def _to_decimal(value) -> Decimal | None:
         normalized = normalized.replace(",", ".")
 
     try:
-        return Decimal(normalized)
+        parsed = Decimal(normalized)
     except InvalidOperation:
         return None
+    return parsed if parsed.is_finite() else None
 
 
 def _to_sheet_number_or_blank(value):
@@ -608,8 +604,25 @@ def _rateio_favorecidos_for_distributor(distributor: str) -> tuple[str, ...]:
     return _RATEIO_FAVORECIDOS_BY_DISTRIBUTOR.get(str(distributor or "").strip(), ())
 
 
+def _rateio_allocation_favorecido(distributor: str, favorecido: str) -> str:
+    """Keep the original Favorecido visible while grouping COPEL Helexia PR with Matriz."""
+    if distributor == "COPEL" and favorecido == "Sion - Helexia PR":
+        return "Sion - Matriz"
+    return favorecido
+
+
+def _rateio_target_for_favorecido(
+    distributor: str,
+    favorecido: str,
+) -> tuple[str, str] | None:
+    allocation_favorecido = _rateio_allocation_favorecido(distributor, favorecido)
+    if allocation_favorecido in _rateio_favorecidos_for_distributor(distributor):
+        return distributor, allocation_favorecido
+    return None
+
+
 def _is_rateio_target_enabled(distributor: str, favorecido: str) -> bool:
-    return favorecido in _rateio_favorecidos_for_distributor(distributor)
+    return _rateio_target_for_favorecido(distributor, favorecido) is not None
 
 
 def _distributor_for_rateio_spreadsheet(spreadsheet_id: str) -> str:
@@ -645,8 +658,16 @@ def _configuration_contingency_header(favorecido: str) -> str:
     return f"{_RATEIO_CONFIGURATION_CONTINGENCY_PREFIX} {favorecido}"
 
 
+def _configuration_voltage_header(tensao: str, favorecido: str) -> str:
+    return f"Coeficiente {tensao} Tensao {favorecido}"
+
+
 def _configurable_contingency_favorecidos_for_distributor(distributor: str) -> tuple[str, ...]:
     distributor_name = str(distributor or "").strip()
+    if distributor_name == "COPEL":
+        # Keep the legacy COPEL configuration layout intact even though
+        # Helexia PR now participates in the Matriz allocation target.
+        return ("Sion - Helexia PR",)
     enabled_favorecidos = set(_rateio_favorecidos_for_distributor(distributor_name))
     return tuple(
         favorecido
@@ -658,7 +679,19 @@ def _configurable_contingency_favorecidos_for_distributor(distributor: str) -> t
 
 def _configuration_headers_for_distributor(distributor: str) -> list[str]:
     distributor_name = str(distributor or "").strip()
-    enabled_favorecidos = _rateio_favorecidos_for_distributor(distributor_name)
+    if distributor_name != "COPEL":
+        favorecidos = _GENERATION_FAVORECIDOS_BY_DISTRIBUTOR.get(distributor_name, ())
+        headers = [_RATEIO_CONFIGURATION_MONTH_HEADER, _RATEIO_CONFIGURATION_STATUS_HEADER]
+        for favorecido in favorecidos:
+            headers.extend((
+                _configuration_coefficient_header(favorecido),
+                _configuration_contingency_header(favorecido),
+                _configuration_voltage_header("Baixa", favorecido),
+                _configuration_voltage_header("Alta", favorecido),
+            ))
+        return headers
+
+    enabled_favorecidos = _GENERATION_FAVORECIDOS_BY_DISTRIBUTOR.get(distributor_name, ())
     headers = [_RATEIO_CONFIGURATION_MONTH_HEADER]
 
     for favorecido in _RATEIO_CONFIGURATION_FAVORECIDOS:
@@ -670,8 +703,6 @@ def _configuration_headers_for_distributor(distributor: str) -> list[str]:
     special_defaults = _special_allocation_defaults_for_distributor(distributor_name)
     if special_defaults:
         headers.append(_RATEIO_CONFIGURATION_SPECIAL_BASE_HEADER)
-        if str(special_defaults.get("remainder_favorecido") or "").strip():
-            headers.append(_RATEIO_CONFIGURATION_REMAINDER_FAVORECIDO_HEADER)
         if str(special_defaults.get("remainder_uc") or "").strip():
             headers.append(_RATEIO_CONFIGURATION_REMAINDER_UC_HEADER)
 
@@ -790,37 +821,7 @@ def _resolve_task_rateio_target(task: dict) -> tuple[str, str] | None:
     favorecido = _resolve_supported_favorecido(extract_task_favorecido(task))
     if distributor not in TARGET_SHEET_TABS or favorecido is None:
         return None
-    if not _is_rateio_target_enabled(distributor, favorecido):
-        return None
-    return distributor, favorecido
-
-
-def _resolve_effective_favorecido_for_rateio_month(
-    *,
-    task: dict,
-    distributor: str,
-    favorecido: str,
-    rateio_month: str,
-) -> str:
-    """Resolve routing-only Favorecido exceptions."""
-    if (
-        distributor == _HELEXIA_PR_MATRIZ_SOURCE_DISTRIBUTOR
-        and favorecido == _HELEXIA_PR_MATRIZ_SOURCE_FAVORECIDO
-    ):
-        return _HELEXIA_PR_MATRIZ_TARGET_FAVORECIDO
-    return favorecido
-
-
-def _favorecido_output_for_rateio_month(
-    *,
-    task: dict,
-    distributor: str,
-    original_favorecido: str,
-    effective_favorecido: str,
-    rateio_month: str,
-) -> str:
-    del task, distributor, effective_favorecido, rateio_month
-    return original_favorecido
+    return _rateio_target_for_favorecido(distributor, favorecido)
 
 
 def _clear_projection_and_balance_fields(row_data: list[str]) -> list[str]:
@@ -916,11 +917,132 @@ def _set_uc_aneel_output_column(row_data: list, task: dict) -> list:
     return row
 
 
+def _set_tensao_output_column(row_data: list, task: dict) -> list:
+    row = list(row_data)
+    if len(row) < _RATEIO_WRITE_COL_COUNT:
+        row.extend([""] * (_RATEIO_WRITE_COL_COUNT - len(row)))
+    row[_TENSAO_OUTPUT_COL_INDEX] = extract_task_tensao(task)
+    return row
+
+
+def _set_uc_ancora_output_column(row_data: list, task: dict) -> list:
+    row = list(row_data)
+    if len(row) < _RATEIO_WRITE_COL_COUNT:
+        row.extend([""] * (_RATEIO_WRITE_COL_COUNT - len(row)))
+    row[_UC_ANCORA_OUTPUT_COL_INDEX] = extract_task_uc_ancora(task)
+    return row
+
+
+def _is_checked_cell(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().casefold() in {"true", "1"}
+    return value is True or value == 1
+
+
+def _update_frozen_tensao_columns(
+    worksheets: dict,
+    rows_by_target: dict,
+    tasks: list[dict],
+    *,
+    current_month: int,
+    frozen_months_by_distributor: dict[str, set[str]],
+) -> None:
+    """Update only Q on historical rows for cooperados changed in ClickUp."""
+    tensao_by_target_uc = {
+        (target, _normalize_uc_match_key(extract_task_uc(task))): extract_task_tensao(task)
+        for task in tasks
+        for target in (_resolve_task_rateio_target(task),)
+        if target is not None and extract_task_uc(task)
+    }
+    if not tensao_by_target_uc:
+        return
+    for target, rows in rows_by_target.items():
+        ws = worksheets[target]
+        frozen_months = frozen_months_by_distributor[target[0]]
+        changes = []
+        for offset, row in enumerate(rows):
+            uc = _normalize_uc_match_key(row[3] if len(row) > 3 else "")
+            key = (target, uc)
+            if key not in tensao_by_target_uc or not _is_reference_month_frozen(
+                row[6] if len(row) > 6 else "",
+                current_month,
+                frozen_months,
+            ):
+                continue
+            tensao = tensao_by_target_uc[key]
+            if str(row[_TENSAO_OUTPUT_COL_INDEX] if len(row) > _TENSAO_OUTPUT_COL_INDEX else "") == tensao:
+                continue
+            sheet_row = DATA_START_ROW + offset
+            changes.append({
+                "range": _range_a1(ws.title, f"Q{sheet_row}"),
+                "values": [[tensao]],
+            })
+        for start in range(0, len(changes), CHUNK_SIZE):
+            chunk = changes[start:start + CHUNK_SIZE]
+            _values_batch_update(ws, chunk)
+            stats.sheets_write_requests += 1
+            stats.sheets_cells_written += len(chunk)
+
+
+def _update_frozen_uc_ancora_columns(
+    worksheets: dict,
+    rows_by_target: dict,
+    tasks: list[dict],
+    *,
+    current_month: int,
+    frozen_months_by_distributor: dict[str, set[str]],
+) -> None:
+    """Keep the ClickUp checkbox visible on closed rows without recalculating them."""
+    anchor_by_target_uc = {
+        (target, _normalize_uc_match_key(extract_task_uc(task))): extract_task_uc_ancora(task)
+        for task in tasks
+        for target in (_resolve_task_rateio_target(task),)
+        if target is not None and extract_task_uc(task)
+    }
+    if not anchor_by_target_uc:
+        return
+    for target, rows in rows_by_target.items():
+        ws = worksheets[target]
+        frozen_months = frozen_months_by_distributor[target[0]]
+        changes = []
+        for offset, row in enumerate(rows):
+            uc = _normalize_uc_match_key(row[3] if len(row) > 3 else "")
+            key = (target, uc)
+            if key not in anchor_by_target_uc or not _is_reference_month_frozen(
+                row[6] if len(row) > 6 else "",
+                current_month,
+                frozen_months,
+            ):
+                continue
+            checked = anchor_by_target_uc[key]
+            previous = row[_UC_ANCORA_OUTPUT_COL_INDEX] if len(row) > _UC_ANCORA_OUTPUT_COL_INDEX else ""
+            if _is_checked_cell(previous) == checked:
+                continue
+            changes.append({
+                "range": _range_a1(ws.title, f"R{DATA_START_ROW + offset}"),
+                "values": [[checked]],
+            })
+        for start in range(0, len(changes), CHUNK_SIZE):
+            chunk = changes[start:start + CHUNK_SIZE]
+            _values_batch_update(ws, chunk)
+            stats.sheets_write_requests += 1
+            stats.sheets_cells_written += len(chunk)
+
+
 def _ensure_invoice_issue_day_header(ws, *, spreadsheet_id: str) -> None:
+    if getattr(ws, "col_count", _RATEIO_WRITE_COL_COUNT) < _RATEIO_WRITE_COL_COUNT:
+        _resize_columns(ws, _RATEIO_WRITE_COL_COUNT, spreadsheet_id=spreadsheet_id)
+        stats.sheets_write_requests += 1
     _values_update(
         ws,
-        "N1:P1",
-        [[_INVOICE_ISSUE_DAY_HEADER, _FAVORECIDO_HEADER, _UC_ANEEL_HEADER]],
+        "N1:R1",
+        [[
+            _INVOICE_ISSUE_DAY_HEADER,
+            _FAVORECIDO_HEADER,
+            _UC_ANEEL_HEADER,
+            _TENSAO_HEADER,
+            _UC_ANCORA_HEADER,
+        ]],
         spreadsheet_id=spreadsheet_id,
     )
     stats.sheets_write_requests += 1
@@ -1136,6 +1258,10 @@ def _apply_k_l_m_targets(
     history_invoice_issue_day_threshold: int = _DEFAULT_HISTORY_INVOICE_ISSUE_DAY_THRESHOLD,
     special_allocation_by_month: dict[str, dict[str, str | Decimal]] | None = None,
     configured_coefficient_by_month: dict[str, Decimal] | None = None,
+    voltage_coefficient_by_month: dict[str, dict[str, Decimal]] | None = None,
+    anchor_allocation_months: set[str] | None = None,
+    allocation_favorecido: str | None = None,
+    allocation_distributor: str = "",
     contingency_coefficient_by_month: dict[str, Decimal] | None = None,
     default_contingency_coefficient: Decimal = Decimal("0.90000000"),
 ) -> None:
@@ -1321,16 +1447,9 @@ def _apply_k_l_m_targets(
 
         def _matches_remainder_rule(rr: dict, rule: dict[str, str | Decimal]) -> bool:
             remainder_uc = str(rule.get("remainder_uc") or "").strip()
-            if remainder_uc:
-                return _normalize_uc_match_key(rr.get("uc", "")) == _normalize_uc_match_key(remainder_uc)
-
-            remainder_favorecido = str(rule.get("remainder_favorecido") or "").strip()
-            if remainder_favorecido:
-                return _normalize_status_key(rr.get("favorecido", "")) == _normalize_status_key(
-                    remainder_favorecido
-                )
-
-            return False
+            return bool(remainder_uc) and (
+                _normalize_uc_match_key(rr.get("uc", "")) == _normalize_uc_match_key(remainder_uc)
+            )
 
         def _m_consumption_for_row(rr: dict) -> Decimal:
             consumo = rr.get("m_consumo")
@@ -1413,31 +1532,17 @@ def _apply_k_l_m_targets(
 
             available_int = max(int(available), 0)
             row_count = len(eligible_remainder_rows)
-            remainder_uc = str(rule.get("remainder_uc") or "").strip()
-            if remainder_uc:
-                base_share = available_int // row_count
-                extra = available_int % row_count
-                for idx, rr in enumerate(eligible_remainder_rows):
-                    m_int = Decimal(base_share + (1 if idx < extra else 0))
-                    rr["m_target"] = m_int
-                    rr["l_target"] = _coef_for_direct_m(rr, m_int)
-                allocation_mode = "uc_direta"
-                remainder_coef = None
-            else:
-                remainder_coef, total_with_remainder = _best_coef_under_goal(
-                    remainder_rows,
-                    base_total=fixed_sum_int + base_sum_int,
-                )
-                for rr in remainder_rows:
-                    rr["l_target"] = remainder_coef
-                    rr["m_target"] = _m_int_for_row(rr, remainder_coef)
-                allocation_mode = "coeficiente_favorecido"
-                available = total_with_remainder - fixed_sum_int - base_sum_int
+            base_share = available_int // row_count
+            extra = available_int % row_count
+            for idx, rr in enumerate(eligible_remainder_rows):
+                m_int = Decimal(base_share + (1 if idx < extra else 0))
+                rr["m_target"] = m_int
+                rr["l_target"] = _coef_for_direct_m(rr, m_int)
 
             logger.info(
                 (
                     "Rateio '%s' mes %s: alocacao especial aplicada "
-                    "(coef_base=%s, base=%s, sobra=%s, linhas_sobra=%d, modo=%s, coef_sobra=%s)."
+                    "(coef_base=%s, base=%s, sobra=%s, linhas_sobra=%d, modo=uc_direta)."
                 ),
                 sheet_label,
                 rateio_month,
@@ -1445,8 +1550,6 @@ def _apply_k_l_m_targets(
                 _format_decimal_plain(base_sum_int),
                 _format_decimal_plain(available),
                 row_count,
-                allocation_mode,
-                _format_decimal_plain(remainder_coef) if remainder_coef is not None else "",
             )
             return True
 
@@ -1471,14 +1574,105 @@ def _apply_k_l_m_targets(
                 _format_decimal_plain(goal_int),
             )
 
-        special_rule = (special_allocation_by_month or {}).get(rateio_month)
-        special_applied = _apply_special_allocation(special_rule)
         configured_coef = (
             (configured_coefficient_by_month or {}).get(rateio_month)
             if configured_coefficient_by_month is not None
             else None
         )
+        voltage_coefs = (voltage_coefficient_by_month or {}).get(rateio_month, {})
+
+        def _row_configured_coef(rr: dict) -> Decimal | None:
+            tensao_key = _normalize_status_key(rr.get("tensao", ""))
+            if tensao_key == "alta tensao":
+                return voltage_coefs.get("Alta Tensão", configured_coef)
+            if tensao_key == "baixa tensao":
+                return voltage_coefs.get("Baixa Tensão", configured_coef)
+            return configured_coef
+
+        anchor_applied = False
+        if rateio_month in (anchor_allocation_months or set()):
+            anchors = [
+                rr for rr in adjustable_rows
+                if rr.get("uc_ancora") and _m_consumption_for_row(rr) > 0
+                and (
+                    allocation_favorecido is None
+                    or _normalize_status_key(
+                        _rateio_allocation_favorecido(
+                            allocation_distributor,
+                            rr.get("favorecido", ""),
+                        )
+                    ) == _normalize_status_key(allocation_favorecido)
+                )
+            ]
+            anchor_ids = {id(rr) for rr in anchors}
+            base_rows = [rr for rr in adjustable_rows if id(rr) not in anchor_ids]
+            missing_coefficients = [rr for rr in base_rows if _row_configured_coef(rr) is None]
+            if anchors and not missing_coefficients:
+                base_sum_int = sum(
+                    (_m_int_for_row(rr, _quantize_coef_8(_row_configured_coef(rr))) for rr in base_rows),
+                    Decimal("0"),
+                )
+                if fixed_sum_int + base_sum_int > goal_int:
+                    logger.warning(
+                        "Rateio '%s' mes %s: coeficientes configurados excedem geracao; sobra das UCs Ancora zerada.",
+                        sheet_label,
+                        rateio_month,
+                    )
+                for rr in fixed_rows:
+                    rr["l_target"] = contingency_coef
+                    rr["m_target"] = _m_int_for_row(rr, contingency_coef)
+                for rr in base_rows:
+                    coef = _quantize_coef_8(_row_configured_coef(rr))
+                    rr["l_target"] = coef
+                    rr["m_target"] = _m_int_for_row(rr, coef)
+                available = max(0, int(goal_int - fixed_sum_int - base_sum_int))
+                share, extra = divmod(available, len(anchors))
+                for index, rr in enumerate(anchors):
+                    m_int = Decimal(share + (1 if index < extra else 0))
+                    rr["m_target"] = m_int
+                    rr["l_target"] = _coef_for_direct_m(rr, m_int)
+                anchor_applied = True
+                logger.info(
+                    "Rateio '%s' mes %s: %d kWh de sobra distribuidos entre %d UCs Ancora.",
+                    sheet_label,
+                    rateio_month,
+                    available,
+                    len(anchors),
+                )
+            elif not anchors:
+                logger.warning(
+                    "Rateio '%s' mes %s: sem UC Ancora elegivel; a sobra nao sera atribuida a uma ancora.",
+                    sheet_label,
+                    rateio_month,
+                )
+            else:
+                logger.warning(
+                    "Rateio '%s' mes %s: coeficiente ausente para cooperados fora das UCs Ancora; ajuste automatico aplicado.",
+                    sheet_label,
+                    rateio_month,
+                )
+
+        special_rule = (special_allocation_by_month or {}).get(rateio_month)
+        special_applied = anchor_applied or _apply_special_allocation(special_rule)
         configured_applied = False
+        if not special_applied and voltage_coefs and adjustable_rows:
+            row_coefficients = [_row_configured_coef(rr) for rr in adjustable_rows]
+            if all(coef is not None for coef in row_coefficients):
+                for rr in fixed_rows:
+                    rr["l_target"] = contingency_coef
+                    rr["m_target"] = _m_int_for_row(rr, contingency_coef)
+                for rr, coef in zip(adjustable_rows, row_coefficients):
+                    fixed_coef = _quantize_coef_8(coef)
+                    rr["l_target"] = fixed_coef
+                    rr["m_target"] = _m_int_for_row(rr, fixed_coef)
+                configured_applied = True
+                special_applied = True
+            else:
+                logger.warning(
+                    "Rateio '%s' mes %s: coeficiente ausente para parte dos cooperados; coeficientes por tensao nao aplicados.",
+                    sheet_label,
+                    rateio_month,
+                )
 
         if not special_applied and configured_coef is not None:
             global_coef = _quantize_coef_8(configured_coef)
@@ -1591,15 +1785,22 @@ def _recalculate_k_l_m_with_monthly_goal(
         if monthly_goals is not None
         else _load_generation_projection_goal_by_month(spreadsheet_id, favorecido)
     )
-    special_allocation_by_month = _load_special_allocation_by_month(
-        spreadsheet_id,
-        favorecido,
+    distributor = _distributor_for_rateio_spreadsheet(spreadsheet_id)
+    special_allocation_by_month = (
+        _load_special_allocation_by_month(spreadsheet_id, favorecido)
+        if distributor == "COPEL" else {}
     )
     configured_coefficient_by_month = _load_configured_coefficient_by_month(
         spreadsheet_id,
         favorecido,
     )
-    distributor = _distributor_for_rateio_spreadsheet(spreadsheet_id)
+    voltage_coefficient_by_month = _load_voltage_coefficient_by_month(
+        spreadsheet_id,
+        favorecido,
+    ) if distributor != "COPEL" else {}
+    anchor_allocation_months = (
+        set(configured_coefficient_by_month) | set(voltage_coefficient_by_month)
+    )
     contingency_coefficient_by_month = _load_contingency_coefficient_by_month(
         spreadsheet_id,
         favorecido,
@@ -1620,14 +1821,14 @@ def _recalculate_k_l_m_with_monthly_goal(
 
     for chunk_start in range(start_row, max_row + 1, CHUNK_SIZE):
         chunk_end = min(max_row, chunk_start + CHUNK_SIZE - 1)
-        values = _values_get(ws, f"A{chunk_start}:O{chunk_end}", spreadsheet_id=spreadsheet_id)
+        values = _values_get(ws, f"A{chunk_start}:R{chunk_end}", spreadsheet_id=spreadsheet_id)
         expected_size = chunk_end - chunk_start + 1
 
         for offset in range(expected_size):
             row_idx = chunk_start + offset
             row = values[offset] if offset < len(values) else []
 
-            # Range A:P => alteracao=A(0), status=B(1), uc=D(3), mes=G(6),
+            # Range A:Q => alteracao=A(0), status=B(1), uc=D(3), mes=G(6),
             # H(7), I(8), J(9), K(10), L(11), M(12), dia emissao=N(13),
             # favorecido=O(14), UC Aneel=P(15).
             rateio_month = str(row[0] if len(row) > 0 else "").strip()
@@ -1648,6 +1849,10 @@ def _recalculate_k_l_m_with_monthly_goal(
             current_m = str(row[12] if len(row) > 12 else "").strip()
             invoice_issue_day = row[13] if len(row) > 13 else ""
             favorecido_row = str(row[14] if len(row) > 14 else "").strip()
+            tensao_row = str(row[_TENSAO_OUTPUT_COL_INDEX] if len(row) > _TENSAO_OUTPUT_COL_INDEX else "").strip()
+            uc_ancora = _is_checked_cell(
+                row[_UC_ANCORA_OUTPUT_COL_INDEX] if len(row) > _UC_ANCORA_OUTPUT_COL_INDEX else ""
+            )
             month_ref_norm = _normalize_month_reference_any(month_ref)
             rateio_month_norm = _normalize_month_reference_any(rateio_month)
             current_m_num = _to_decimal(current_m)
@@ -1672,6 +1877,8 @@ def _recalculate_k_l_m_with_monthly_goal(
                 "rateio_month": _normalize_month_reference_any(rateio_month),
                 "invoice_issue_day": invoice_issue_day,
                 "favorecido": favorecido_row,
+                "tensao": tensao_row,
+                "uc_ancora": uc_ancora,
                 "h": h_value,
                 "m_consumo": m_consumo,
                 "i": val_i or Decimal("0"),
@@ -1749,6 +1956,10 @@ def _recalculate_k_l_m_with_monthly_goal(
         ),
         special_allocation_by_month=special_allocation_by_month,
         configured_coefficient_by_month=configured_coefficient_by_month,
+        voltage_coefficient_by_month=voltage_coefficient_by_month,
+        anchor_allocation_months=anchor_allocation_months,
+        allocation_favorecido=favorecido,
+        allocation_distributor=distributor,
         contingency_coefficient_by_month=contingency_coefficient_by_month,
         default_contingency_coefficient=default_contingency_coefficient,
     )
@@ -1862,15 +2073,22 @@ def _recalculate_k_l_m_for_months(
         if monthly_goals is not None
         else _load_generation_projection_goal_by_month(spreadsheet_id, favorecido)
     )
-    special_allocation_by_month = _load_special_allocation_by_month(
-        spreadsheet_id,
-        favorecido,
+    distributor = _distributor_for_rateio_spreadsheet(spreadsheet_id)
+    special_allocation_by_month = (
+        _load_special_allocation_by_month(spreadsheet_id, favorecido)
+        if distributor == "COPEL" else {}
     )
     configured_coefficient_by_month = _load_configured_coefficient_by_month(
         spreadsheet_id,
         favorecido,
     )
-    distributor = _distributor_for_rateio_spreadsheet(spreadsheet_id)
+    voltage_coefficient_by_month = _load_voltage_coefficient_by_month(
+        spreadsheet_id,
+        favorecido,
+    ) if distributor != "COPEL" else {}
+    anchor_allocation_months = (
+        set(configured_coefficient_by_month) | set(voltage_coefficient_by_month)
+    )
     contingency_coefficient_by_month = _load_contingency_coefficient_by_month(
         spreadsheet_id,
         favorecido,
@@ -1920,6 +2138,10 @@ def _recalculate_k_l_m_for_months(
         current_m = str(row[12] if len(row) > 12 else "").strip()
         invoice_issue_day = row[13] if len(row) > 13 else ""
         favorecido_row = str(row[14] if len(row) > 14 else "").strip()
+        tensao_row = str(row[_TENSAO_OUTPUT_COL_INDEX] if len(row) > _TENSAO_OUTPUT_COL_INDEX else "").strip()
+        uc_ancora = _is_checked_cell(
+            row[_UC_ANCORA_OUTPUT_COL_INDEX] if len(row) > _UC_ANCORA_OUTPUT_COL_INDEX else ""
+        )
         h_value = val_h or Decimal("0")
         m_consumo = _new_rateio_consumption_for_alteracao_month(
             uc,
@@ -1937,6 +2159,8 @@ def _recalculate_k_l_m_for_months(
             "rateio_month": _normalize_month_reference_any(rateio_month),
             "invoice_issue_day": invoice_issue_day,
             "favorecido": favorecido_row,
+            "tensao": tensao_row,
+            "uc_ancora": uc_ancora,
             "h": h_value,
             "m_consumo": m_consumo,
             "i": val_i or Decimal("0"),
@@ -2001,6 +2225,10 @@ def _recalculate_k_l_m_for_months(
         ),
         special_allocation_by_month=special_allocation_by_month,
         configured_coefficient_by_month=configured_coefficient_by_month,
+        voltage_coefficient_by_month=voltage_coefficient_by_month,
+        anchor_allocation_months=anchor_allocation_months,
+        allocation_favorecido=favorecido,
+        allocation_distributor=distributor,
         contingency_coefficient_by_month=contingency_coefficient_by_month,
         default_contingency_coefficient=default_contingency_coefficient,
     )
@@ -2382,11 +2610,6 @@ def _load_special_allocation_by_month(
         _RATEIO_CONFIGURATION_SPECIAL_BASE_HEADER,
         fallback=5 if legacy_layout else None,
     )
-    remainder_favorecido_index = _configuration_index(
-        header_indexes,
-        _RATEIO_CONFIGURATION_REMAINDER_FAVORECIDO_HEADER,
-        fallback=6 if legacy_layout else None,
-    )
     remainder_uc_index = _configuration_index(
         header_indexes,
         _RATEIO_CONFIGURATION_REMAINDER_UC_HEADER,
@@ -2414,20 +2637,15 @@ def _load_special_allocation_by_month(
             invalid += 1
             continue
 
-        remainder_favorecido = _row_value_by_index(row, remainder_favorecido_index)
         remainder_uc = _row_value_by_index(row, remainder_uc_index)
-        if not remainder_favorecido:
-            remainder_favorecido = str(defaults.get("remainder_favorecido", "")).strip()
         if not remainder_uc:
             remainder_uc = str(defaults.get("remainder_uc", "")).strip()
-        if not remainder_favorecido and not remainder_uc:
+        if not remainder_uc:
             invalid += 1
             continue
 
-        supported_favorecido = _resolve_supported_favorecido(remainder_favorecido)
         rules[rateio_month] = {
             "base_coef": _quantize_coef_8(base_coef),
-            "remainder_favorecido": supported_favorecido or remainder_favorecido,
             "remainder_uc": remainder_uc,
         }
 
@@ -2627,6 +2845,81 @@ def _load_configured_coefficient_by_month(
     return result
 
 
+def _load_voltage_coefficient_by_month(
+    spreadsheet_id: str,
+    favorecido: str,
+) -> dict[str, dict[str, Decimal]]:
+    """Read manual voltage coefficients for non-COPEL configurations."""
+    if _distributor_for_rateio_spreadsheet(spreadsheet_id) == "COPEL":
+        return {}
+    try:
+        ws = get_worksheet(
+            _RATEIO_CONFIGURATION_TAB,
+            spreadsheet_id=spreadsheet_id,
+            create_if_missing=False,
+        )
+    except RuntimeError as exc:
+        if "nao encontrada" not in str(exc).lower():
+            raise
+        return {}
+
+    rows = _values_get(ws, f"A1:Z{ws.row_count}", spreadsheet_id=spreadsheet_id)
+    formatted_rows = _values_get(
+        ws,
+        f"A1:Z{ws.row_count}",
+        spreadsheet_id=spreadsheet_id,
+        value_render_option="FORMATTED_VALUE",
+    )
+    formula_rows = _values_get(
+        ws,
+        f"A1:Z{ws.row_count}",
+        spreadsheet_id=spreadsheet_id,
+        value_render_option="FORMULA",
+    )
+    if not rows:
+        return {}
+
+    header_indexes, data_rows, data_start_index = _configuration_header_and_data_rows(rows)
+    month_index = _configuration_index(header_indexes, _RATEIO_CONFIGURATION_MONTH_HEADER, fallback=0)
+    indexes = {
+        "Baixa Tensão": _configuration_index(
+            header_indexes, _configuration_voltage_header("Baixa", favorecido)
+        ),
+        "Alta Tensão": _configuration_index(
+            header_indexes, _configuration_voltage_header("Alta", favorecido)
+        ),
+    }
+    result: dict[str, dict[str, Decimal]] = {}
+    invalid = 0
+    for data_index, row in enumerate(data_rows):
+        month = _normalize_month_reference_any(_row_value_by_index(row, month_index))
+        if not month:
+            continue
+        row_index = data_start_index + data_index
+        for tensao, col_index in indexes.items():
+            value = _config_numeric_cell_text(
+                row,
+                _row_at(formatted_rows, row_index),
+                _row_at(formula_rows, row_index),
+                col_index,
+            )
+            if not value:
+                continue
+            coef = _to_decimal(value)
+            if coef is None or coef < 0 or coef > _MAX_SPECIAL_BASE_COEFFICIENT:
+                invalid += 1
+                continue
+            result.setdefault(month, {})[tensao] = _quantize_coef_8(coef)
+    if invalid:
+        logger.warning(
+            "Configuracao (%s / %s): %d coeficientes de tensao invalidos ignorados.",
+            spreadsheet_id,
+            favorecido,
+            invalid,
+        )
+    return result
+
+
 def _configuration_coefficient_formula(
     tab_name: str,
     *,
@@ -2667,6 +2960,170 @@ def _sanitize_special_base_coefficient(value: object) -> str:
     return text
 
 
+def _sync_standardized_configuration_layout(
+    spreadsheet_id: str,
+    *,
+    current_month: int,
+    distributor: str,
+) -> int:
+    """Migrate non-COPEL configuration by header while retaining every month."""
+    headers = _configuration_headers_for_distributor(distributor)
+    ws = get_worksheet(
+        _RATEIO_CONFIGURATION_TAB,
+        spreadsheet_id=spreadsheet_id,
+        create_if_missing=False,
+    )
+    existing = _values_get(ws, f"A1:Z{ws.row_count}", spreadsheet_id=spreadsheet_id)
+    formatted = _values_get(
+        ws, f"A1:Z{ws.row_count}", spreadsheet_id=spreadsheet_id,
+        value_render_option="FORMATTED_VALUE",
+    )
+    formulas = _values_get(
+        ws, f"A1:Z{ws.row_count}", spreadsheet_id=spreadsheet_id,
+        value_render_option="FORMULA",
+    )
+    stats.sheets_read_requests += 3
+    indexes, data_rows, data_start = _configuration_header_and_data_rows(existing)
+    old_headers = existing[0] if indexes else []
+    known_headers = {
+        _normalize_status_key(header)
+        for header in (
+            headers
+            + [
+                "Mes",
+                "Coeficiente",
+                _RATEIO_CONFIGURATION_SPECIAL_BASE_HEADER,
+                _RATEIO_CONFIGURATION_REMAINDER_UC_HEADER,
+                "Sobra para Favorecido",
+            ]
+            + [_configuration_coefficient_header(favorecido) for favorecido in _GENERATION_TOTAL_COLUMNS]
+            + [_configuration_contingency_header(favorecido) for favorecido in _GENERATION_TOTAL_COLUMNS]
+        )
+    }
+    unknown = [
+        header for header in old_headers[:len(headers)]
+        if str(header).strip() and _normalize_status_key(header) not in known_headers
+    ]
+    if unknown:
+        raise RuntimeError(
+            f"Configuracao ({distributor}): colunas desconhecidas na area gerenciada: {unknown!r}."
+        )
+
+    # A new managed column may cover old unlabeled manual data. Check both
+    # displayed values and formulas before overwriting that position.
+    unlabeled_columns = (
+        range(8, len(headers)) if not indexes else
+        (col for col in range(len(headers)) if not _row_value_by_index(old_headers, col))
+    )
+    for col in unlabeled_columns:
+        if any(
+            _row_value_by_index(_row_at(dataset, row_index), col)
+            for dataset in (existing, formulas)
+            for row_index in range(data_start, len(existing))
+        ):
+            raise RuntimeError(
+                f"Configuracao ({distributor}): dados sem cabecalho na coluna "
+                f"{_column_letter(col)} da area gerenciada."
+            )
+
+    month_index = _configuration_index(indexes, _RATEIO_CONFIGURATION_MONTH_HEADER, fallback=0)
+    status_index = _configuration_index(
+        indexes, _RATEIO_CONFIGURATION_STATUS_HEADER,
+        fallback=4 if not indexes else None,
+    )
+    values_by_month: dict[str, dict[str, str]] = {}
+    row_slots: list[str | None] = []
+    legacy_coefficient_columns = {
+        "Sion - Matriz": 1,
+        "Sion - Helexia PR": 2,
+        "Sion - Helexia MS": 3,
+    }
+    for data_index, row in enumerate(data_rows):
+        month = _normalize_month_reference_any(_row_value_by_index(row, month_index))
+        if not month:
+            if any(str(value).strip() for value in row[:len(headers)]):
+                raise RuntimeError(
+                    f"Configuracao ({distributor}): linha sem mes com dados na area gerenciada."
+                )
+            row_slots.append(None)
+            continue
+        if month in values_by_month:
+            raise RuntimeError(f"Configuracao ({distributor}): mes duplicado {month}.")
+        row_slots.append(month)
+        row_index = data_start + data_index
+        formatted_row = _row_at(formatted, row_index)
+        formula_row = _row_at(formulas, row_index)
+        status = _row_value_by_index(row, status_index)
+        if not status and _normalize_status_key(_row_value_by_index(row, 2)) in {
+            "aberto", _RATEIO_CONFIGURATION_CLOSED_STATUS,
+        }:
+            status = _row_value_by_index(row, 2)
+        values = {
+            _RATEIO_CONFIGURATION_MONTH_HEADER: month,
+            _RATEIO_CONFIGURATION_STATUS_HEADER: status or "Aberto",
+        }
+        for favorecido in _GENERATION_FAVORECIDOS_BY_DISTRIBUTOR.get(distributor, ()):
+            for header in (
+                _configuration_coefficient_header(favorecido),
+                _configuration_contingency_header(favorecido),
+                _configuration_voltage_header("Baixa", favorecido),
+                _configuration_voltage_header("Alta", favorecido),
+            ):
+                col_index = _configuration_index(indexes, header)
+                if not indexes and header == _configuration_coefficient_header(favorecido):
+                    col_index = legacy_coefficient_columns[favorecido]
+                raw = _config_numeric_cell_text(row, formatted_row, formula_row, col_index)
+                clean = _sanitize_special_base_coefficient(raw)
+                if raw and not clean:
+                    logger.warning(
+                        "Configuracao (%s) mes %s: coeficiente invalido em %s ignorado.",
+                        distributor, month, header,
+                    )
+                if not clean and header == _configuration_contingency_header(favorecido):
+                    clean = _format_decimal_plain(
+                        _default_contingency_coefficient_for_month(distributor, favorecido, month)
+                    )
+                values[header] = clean
+        values_by_month[month] = values
+
+    for reference_month in _reference_month_window(current_month):
+        month = format_reference_month(_add_months(reference_month, 1))
+        if month in values_by_month:
+            continue
+        row_slots.append(month)
+        values = {
+            _RATEIO_CONFIGURATION_MONTH_HEADER: month,
+            _RATEIO_CONFIGURATION_STATUS_HEADER: "Aberto",
+        }
+        for favorecido in _GENERATION_FAVORECIDOS_BY_DISTRIBUTOR.get(distributor, ()):
+            values[_configuration_contingency_header(favorecido)] = _format_decimal_plain(
+                _default_contingency_coefficient_for_month(distributor, favorecido, month)
+            )
+        values_by_month[month] = values
+
+    target_rows = [
+        [values_by_month[month].get(header, "") for header in headers]
+        if month is not None else [""] * len(headers)
+        for month in row_slots
+    ]
+    last_col = _column_letter(len(headers) - 1)
+    if getattr(ws, "col_count", len(headers)) < len(headers):
+        _resize_columns(ws, len(headers), spreadsheet_id=spreadsheet_id)
+        stats.sheets_write_requests += 1
+    needed_rows = DATA_START_ROW + len(target_rows) - 1
+    if getattr(ws, "row_count", needed_rows) < needed_rows:
+        _resize_rows(ws, needed_rows, spreadsheet_id=spreadsheet_id)
+        stats.sheets_write_requests += 1
+    last_row = DATA_START_ROW + len(target_rows) - 1 if target_rows else 1
+    _values_update(
+        ws, f"A1:{last_col}{last_row}", [headers, *target_rows],
+        spreadsheet_id=spreadsheet_id,
+    )
+    stats.sheets_write_requests += 1
+    stats.sheets_cells_written += len(headers) * (1 + len(target_rows))
+    return len(target_rows)
+
+
 def _sync_rateio_configuration_layout(
     spreadsheet_id: str,
     *,
@@ -2679,12 +3136,18 @@ def _sync_rateio_configuration_layout(
     A lista de meses acompanha a mesma janela do rateio. Colunas e linhas fora
     do range gerenciado nao sao limpas, pois a aba pode conter controles manuais.
     """
+    distributor_name = distributor or _distributor_for_rateio_spreadsheet(spreadsheet_id)
+    if distributor_name != "COPEL":
+        return _sync_standardized_configuration_layout(
+            spreadsheet_id,
+            current_month=current_month,
+            distributor=distributor_name,
+        )
     ws = get_worksheet(
         _RATEIO_CONFIGURATION_TAB,
         spreadsheet_id=spreadsheet_id,
         create_if_missing=False,
     )
-    distributor_name = distributor or _distributor_for_rateio_spreadsheet(spreadsheet_id)
     headers = _configuration_headers_for_distributor(distributor_name)
     last_col_letter = _column_letter(len(headers) - 1)
 
@@ -2727,11 +3190,6 @@ def _sync_rateio_configuration_layout(
         _RATEIO_CONFIGURATION_SPECIAL_BASE_HEADER,
         fallback=5 if legacy_layout else None,
     )
-    remainder_favorecido_index = _configuration_index(
-        header_indexes,
-        _RATEIO_CONFIGURATION_REMAINDER_FAVORECIDO_HEADER,
-        fallback=6 if legacy_layout else None,
-    )
     remainder_uc_index = _configuration_index(
         header_indexes,
         _RATEIO_CONFIGURATION_REMAINDER_UC_HEADER,
@@ -2756,7 +3214,7 @@ def _sync_rateio_configuration_layout(
 
     status_by_month: dict[str, str] = {}
     coefficient_by_month: dict[tuple[str, str], str] = {}
-    special_by_month: dict[str, tuple[str, str, str]] = {}
+    special_by_month: dict[str, tuple[str, str]] = {}
     contingency_by_month: dict[tuple[str, str], str] = {}
     for data_index, row in enumerate(existing_data_rows):
         month_ref = _normalize_month_reference_any(_row_value_by_index(row, month_index))
@@ -2816,7 +3274,6 @@ def _sync_rateio_configuration_layout(
         special_coef = sanitized_coef
         special_by_month[month_ref] = (
             special_coef,
-            _row_value_by_index(row, remainder_favorecido_index),
             _row_value_by_index(row, remainder_uc_index),
         )
         for favorecido, coef_index in contingency_indexes.items():
@@ -2855,16 +3312,16 @@ def _sync_rateio_configuration_layout(
         format_reference_month(_add_months(month, 1))
         for month in _reference_month_window(current_month)
     ]
-    enabled_favorecidos = set(_rateio_favorecidos_for_distributor(distributor_name))
+    enabled_favorecidos = set(
+        _GENERATION_FAVORECIDOS_BY_DISTRIBUTOR.get(distributor_name, ())
+    )
     special_defaults = _special_allocation_defaults_for_distributor(distributor_name) or {}
     target_rows: list[list] = []
     for offset, rateio_month in enumerate(rateio_months, start=2):
-        special_coef, special_favorecido, special_uc = special_by_month.get(
+        special_coef, special_uc = special_by_month.get(
             rateio_month,
-            ("", "", ""),
+            ("", ""),
         )
-        if not special_favorecido:
-            special_favorecido = str(special_defaults.get("remainder_favorecido", "")).strip()
         if not special_uc:
             special_uc = str(special_defaults.get("remainder_uc", "")).strip()
         values_by_header = {
@@ -2873,10 +3330,6 @@ def _sync_rateio_configuration_layout(
         }
         if _RATEIO_CONFIGURATION_SPECIAL_BASE_HEADER in headers:
             values_by_header[_RATEIO_CONFIGURATION_SPECIAL_BASE_HEADER] = special_coef
-        if _RATEIO_CONFIGURATION_REMAINDER_FAVORECIDO_HEADER in headers:
-            values_by_header[
-                _RATEIO_CONFIGURATION_REMAINDER_FAVORECIDO_HEADER
-            ] = special_favorecido
         if _RATEIO_CONFIGURATION_REMAINDER_UC_HEADER in headers:
             values_by_header[_RATEIO_CONFIGURATION_REMAINDER_UC_HEADER] = special_uc
 
@@ -2886,7 +3339,7 @@ def _sync_rateio_configuration_layout(
             else None
         )
         for favorecido in _RATEIO_CONFIGURATION_FAVORECIDOS:
-            if enabled_favorecidos and favorecido not in enabled_favorecidos:
+            if favorecido not in enabled_favorecidos:
                 continue
             favorecido_special_defaults = _special_allocation_defaults(
                 distributor_name,
@@ -3751,7 +4204,7 @@ def _build_generation_rows_by_tab() -> dict[str, list[list[str]]]:
             ignored_without_distributor += 1
             continue
         if favorecido is None:
-            enabled_favorecidos = _rateio_favorecidos_for_distributor(target_tab)
+            enabled_favorecidos = _GENERATION_FAVORECIDOS_BY_DISTRIBUTOR.get(target_tab, ())
             if len(enabled_favorecidos) == 1:
                 favorecido = enabled_favorecidos[0]
             else:
@@ -3993,7 +4446,7 @@ def _build_powerrev_indexes(
     return current_month, months, invoice_by_month
 
 
-def _latest_powerrev_invoice_issue_for_month(
+def _latest_powerrev_next_reading_for_month(
     uc: str,
     month: int,
     invoice_by_month: dict[int, dict[str, dict[str, str]]],
@@ -4015,9 +4468,9 @@ def _latest_powerrev_invoice_issue_for_month(
         invoices = invoice_by_month.get(candidate_month, {})
         for normalized_uc in candidates:
             invoice = invoices.get(normalized_uc) or {}
-            issue_value = invoice.get("dtEmissao") or invoice.get("invoice_issue_day") or ""
-            if _powerrev_invoice_issue_day(issue_value) is not None:
-                return str(issue_value).strip()
+            reading_value = invoice.get("dtProximaLeitura") or ""
+            if _powerrev_invoice_issue_day(reading_value) is not None:
+                return str(reading_value).strip()
 
     return ""
 
@@ -4043,17 +4496,17 @@ def _build_open_month_payload(
         ) or {}
         if previous_invoice:
             break
-    issue_value = _latest_powerrev_invoice_issue_for_month(
+    reading_value = _latest_powerrev_next_reading_for_month(
         uc,
         month,
         invoice_by_month,
         lookup_ucs=lookup_ucs,
     )
-    issue_day = _powerrev_invoice_issue_day(issue_value)
+    issue_day = _powerrev_invoice_issue_day(reading_value)
     return {
         "nuMesReferencia": format_reference_month(month),
         "saldo_23_24": previous_invoice.get("saldo_23_24", ""),
-        "dtEmissao": issue_value,
+        "dtProximaLeitura": reading_value,
         "invoice_issue_day": str(issue_day) if issue_day is not None else "",
     }
 
@@ -4305,7 +4758,7 @@ def _recalculate_all_rateio_targets_for_delta(
                     distributor_name
                 ),
             )
-            for distributor in TARGET_SHEET_TABS
+            for distributor in _RATEIO_FAVORECIDOS_BY_DISTRIBUTOR
         }
     )
     frozen_months = (
@@ -4318,7 +4771,7 @@ def _recalculate_all_rateio_targets_for_delta(
                     sid
                 ),
             )
-            for distributor in TARGET_SHEET_TABS
+            for distributor in _RATEIO_FAVORECIDOS_BY_DISTRIBUTOR
         }
     )
 
@@ -4421,6 +4874,18 @@ def full_sync() -> None:
 
     _known_task_ids = {t.get("id", "") for t in tasks_raw if t.get("id")}
     tasks = _prioritize_tasks_by_uc(tasks_raw)
+    tensao_by_target_uc = {
+        (target, _normalize_uc_match_key(extract_task_uc(task))): extract_task_tensao(task)
+        for task in tasks
+        for target in (_resolve_task_rateio_target(task),)
+        if target is not None and extract_task_uc(task)
+    }
+    anchor_by_target_uc = {
+        (target, _normalize_uc_match_key(extract_task_uc(task))): extract_task_uc_ancora(task)
+        for task in tasks
+        for target in (_resolve_task_rateio_target(task),)
+        if target is not None and extract_task_uc(task)
+    }
     current_month, months_window, invoice_by_month = _build_powerrev_indexes(tasks)
     projection_index = _build_projection_index()
     last_rateio_index_by_distributor = {
@@ -4430,7 +4895,7 @@ def full_sync() -> None:
                 distributor_name
             ),
         )
-        for distributor in TARGET_SHEET_TABS
+        for distributor in _RATEIO_FAVORECIDOS_BY_DISTRIBUTOR
     }
 
     # 2. Build rows por distribuidora + favorecido.
@@ -4487,14 +4952,8 @@ def full_sync() -> None:
                 invoice_by_month,
                 lookup_ucs=lookup_ucs,
             )
-            favorecido = _resolve_effective_favorecido_for_rateio_month(
-                task=task,
-                distributor=distributor,
-                favorecido=favorecido_original,
-                rateio_month=rateio_month,
-            )
-            target = (distributor, favorecido)
-            if not _is_rateio_target_enabled(distributor, favorecido):
+            target = _rateio_target_for_favorecido(distributor, favorecido_original)
+            if target is None:
                 without_rateio_target += 1
                 continue
 
@@ -4518,17 +4977,10 @@ def full_sync() -> None:
                 task,
                 enriched_payload.get("invoice_issue_day", ""),
             )
-            row_data = _set_favorecido_output_column(
-                row_data,
-                _favorecido_output_for_rateio_month(
-                    task=task,
-                    distributor=distributor,
-                    original_favorecido=favorecido_original,
-                    effective_favorecido=favorecido,
-                    rateio_month=rateio_month,
-                ),
-            )
+            row_data = _set_favorecido_output_column(row_data, favorecido_original)
             row_data = _set_uc_aneel_output_column(row_data, task)
+            row_data = _set_tensao_output_column(row_data, task)
+            row_data = _set_uc_ancora_output_column(row_data, task)
             rows_by_target[target].append(row_data)
             future_rows += 1
 
@@ -4583,7 +5035,7 @@ def full_sync() -> None:
     _sync_generation_total_tabs()
 
     frozen_months_by_distributor: dict[str, set[str]] = {}
-    for distributor in TARGET_SHEET_TABS:
+    for distributor in _RATEIO_FAVORECIDOS_BY_DISTRIBUTOR:
         spreadsheet_id, _ = resolve_rateio_sheet_target(distributor)
         frozen_months_by_distributor[distributor] = _run_sheets_step_with_retry(
             f"Configuracao [{distributor}]",
@@ -4617,6 +5069,17 @@ def full_sync() -> None:
         )
         goals_by_target[target] = goals
 
+    for distributor in (name for name in TARGET_SHEET_TABS if name != "COPEL"):
+        spreadsheet_id, _ = resolve_rateio_sheet_target(distributor)
+        _run_sheets_step_with_retry(
+            f"Layout Configuracao [{distributor}]",
+            lambda sid=spreadsheet_id, name=distributor: _sync_rateio_configuration_layout(
+                sid,
+                current_month=current_month,
+                distributor=name,
+            ),
+        )
+
     # 3. Escrever cada aba de Favorecido de forma isolada.
     for target in _RATEIO_TARGETS:
         distributor, favorecido = target
@@ -4642,6 +5105,15 @@ def full_sync() -> None:
                 current_month=current_month,
                 frozen_rateio_months=frozen_rateio_months,
             )
+            for row in merged_rows:
+                uc_key = _normalize_uc_match_key(row[3] if len(row) > 3 else "")
+                if (target, uc_key) in tensao_by_target_uc or (target, uc_key) in anchor_by_target_uc:
+                    if len(row) < _RATEIO_WRITE_COL_COUNT:
+                        row.extend([""] * (_RATEIO_WRITE_COL_COUNT - len(row)))
+                    if (target, uc_key) in tensao_by_target_uc:
+                        row[_TENSAO_OUTPUT_COL_INDEX] = tensao_by_target_uc[(target, uc_key)]
+                    if (target, uc_key) in anchor_by_target_uc:
+                        row[_UC_ANCORA_OUTPUT_COL_INDEX] = anchor_by_target_uc[(target, uc_key)]
             changed_rows = sync_rows_in_place(
                 ws_local,
                 merged_rows,
@@ -4688,17 +5160,6 @@ def full_sync() -> None:
             k_changes,
             l_changes,
             m_changes,
-        )
-
-    for distributor in TARGET_SHEET_TABS:
-        spreadsheet_id, _ = resolve_rateio_sheet_target(distributor)
-        _run_sheets_step_with_retry(
-            f"Layout Configuracao [{distributor}]",
-            lambda sid=spreadsheet_id: _sync_rateio_configuration_layout(
-                sid,
-                current_month=current_month,
-                distributor=distributor,
-            ),
         )
 
     _sync_all_formularios()
@@ -4760,12 +5221,12 @@ def delta_sync(last_updated_ts: int) -> int:
                     distributor_name
                 ),
             )
-            for distributor in TARGET_SHEET_TABS
+            for distributor in _RATEIO_FAVORECIDOS_BY_DISTRIBUTOR
         }
         worksheets, uc_month_rows_by_target, rows_by_target = _load_sheet_state()
 
         frozen_months_by_distributor: dict[str, set[str]] = {}
-        for distributor in TARGET_SHEET_TABS:
+        for distributor in _RATEIO_FAVORECIDOS_BY_DISTRIBUTOR:
             spreadsheet_id, _ = resolve_rateio_sheet_target(distributor)
             frozen_months_by_distributor[distributor] = _run_sheets_step_with_retry(
                 f"Configuracao delta [{distributor}]",
@@ -4822,18 +5283,11 @@ def delta_sync(last_updated_ts: int) -> int:
                     if key
                 ]
                 if distributor in TARGET_SHEET_TABS and favorecido_original is not None:
-                    favorecido = _resolve_effective_favorecido_for_rateio_month(
-                        task=task,
-                        distributor=distributor,
-                        favorecido=favorecido_original,
-                        rateio_month=rateio_month,
+                    target = _rateio_target_for_favorecido(
+                        distributor,
+                        favorecido_original,
                     )
-                    if _is_rateio_target_enabled(distributor, favorecido):
-                        target = (distributor, favorecido)
-                    else:
-                        target = None
                 else:
-                    favorecido = ""
                     target = None
 
                 row_data: list = blank_row
@@ -4875,17 +5329,10 @@ def delta_sync(last_updated_ts: int) -> int:
                             task,
                             enriched_payload.get("invoice_issue_day", ""),
                         )
-                        row_data = _set_favorecido_output_column(
-                            row_data,
-                            _favorecido_output_for_rateio_month(
-                                task=task,
-                                distributor=distributor,
-                                original_favorecido=favorecido_original,
-                                effective_favorecido=favorecido,
-                                rateio_month=rateio_month,
-                            ),
-                        )
+                        row_data = _set_favorecido_output_column(row_data, favorecido_original)
                         row_data = _set_uc_aneel_output_column(row_data, task)
+                        row_data = _set_tensao_output_column(row_data, task)
+                        row_data = _set_uc_ancora_output_column(row_data, task)
                         should_clear = False
                         clear_reason = ""
                     else:
@@ -5003,6 +5450,21 @@ def delta_sync(last_updated_ts: int) -> int:
                 ws.title,
                 len(updates),
             )
+
+        _update_frozen_tensao_columns(
+            worksheets,
+            rows_by_target,
+            updated_tasks,
+            current_month=current_month,
+            frozen_months_by_distributor=frozen_months_by_distributor,
+        )
+        _update_frozen_uc_ancora_columns(
+            worksheets,
+            rows_by_target,
+            updated_tasks,
+            current_month=current_month,
+            frozen_months_by_distributor=frozen_months_by_distributor,
+        )
 
         if updated_rows:
             logger.info("Delta ClickUp: %d linhas atualizadas/limpas no total", updated_rows)

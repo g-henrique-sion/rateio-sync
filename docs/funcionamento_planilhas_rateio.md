@@ -20,9 +20,9 @@ O processo (`python -m src.poll`) sempre executa um full sync inicial completo a
 | Uso | ID | Link | Observacao |
 | --- | --- | --- | --- |
 | COPEL | `11TW3jDv8bZYJxPA2sOx73NUdY8QiMbFsgnrfeEopOww` | https://docs.google.com/spreadsheets/d/11TW3jDv8bZYJxPA2sOx73NUdY8QiMbFsgnrfeEopOww/edit | Rateio ativo em `Sion - Matriz`; aba `Helexia PR` preservada como historico fechado. |
-| AmE | `1VK322_aF3N6_JXpvNX2dFEKOn4QKVB9Rz3lZRj7FpOk` | https://docs.google.com/spreadsheets/d/1VK322_aF3N6_JXpvNX2dFEKOn4QKVB9Rz3lZRj7FpOk/edit | Rateio em `Sion - Matriz`. |
+| AmE | `1VK322_aF3N6_JXpvNX2dFEKOn4QKVB9Rz3lZRj7FpOk` | https://docs.google.com/spreadsheets/d/1VK322_aF3N6_JXpvNX2dFEKOn4QKVB9Rz3lZRj7FpOk/edit | Rateio em Sion - Matriz. |
 | Energisa MS | `1usAlgI5WiwLT1aOIy7-yy68EIJ3vFYvcnFwaf22ryyg` | https://docs.google.com/spreadsheets/d/1usAlgI5WiwLT1aOIy7-yy68EIJ3vFYvcnFwaf22ryyg/edit | Rateio ativo: `Sion - Helexia MS`. |
-| CELESC | `1f3ljN863TAg1joLOnyhoG9Fh125LdIherxpArrxxTsk` | https://docs.google.com/spreadsheets/d/1f3ljN863TAg1joLOnyhoG9Fh125LdIherxpArrxxTsk/edit | Rateio em `Sion - Matriz`. |
+| CELESC | `1f3ljN863TAg1joLOnyhoG9Fh125LdIherxpArrxxTsk` | https://docs.google.com/spreadsheets/d/1f3ljN863TAg1joLOnyhoG9Fh125LdIherxpArrxxTsk/edit | Rateio em Sion - Matriz. |
 | Projecoes | `1flNyO53loY__fwO-TDqffAFAOdw7KuyjVM9cYGZmRSI` | https://docs.google.com/spreadsheets/d/1flNyO53loY__fwO-TDqffAFAOdw7KuyjVM9cYGZmRSI/edit | Fonte externa das abas `Projecao de Consumo` e `Projecao de Geracao`. |
 | Pesquisa / Nova UC | `1nhw59fViA8psrshFt7zpqMMZGVYFWnfndPk0AAzGB7E` | https://docs.google.com/spreadsheets/d/1nhw59fViA8psrshFt7zpqMMZGVYFWnfndPk0AAzGB7E/edit | Usada por scripts utilitarios de pesquisa e atualizacao de UC Aneel. |
 
@@ -120,7 +120,7 @@ Se nao houver previsao de consumo para a UC e mes, a linha daquele mes nao entra
 
 ## Abas de rateio principal
 
-As abas de saida do rateio sao separadas por distribuidora e favorecido:
+As abas de saida do rateio sao organizadas por distribuidora e grupo de rateio:
 
 | Distribuidora | Favorecidos habilitados | Aba de saida |
 | --- | --- | --- |
@@ -129,9 +129,7 @@ As abas de saida do rateio sao separadas por distribuidora e favorecido:
 | CELESC | `Sion - Matriz` | `Sion - Matriz` |
 | AmE | `Sion - Matriz` | `Sion - Matriz` |
 
-O rateio de `Sion - Matriz` segue ativo. A antiga regra do campo `Rateio na Sion - Matriz` ligada a `Sobra para Favorecido` foi removida.
-
-Na COPEL, cooperados com Favorecido original `Sion - Helexia PR` participam do mesmo calculo e da mesma meta de geracao de `Sion - Matriz`. A coluna O preserva o Favorecido original. A aba antiga `Helexia PR` conserva apenas seu historico fechado. Se houver coeficiente manual para a Matriz e UCs Ancora marcadas na ClickUp, a sobra da Matriz pode ser distribuida a essas UCs, inclusive as de Favorecido original Helexia PR.
+O rateio de `Sion - Matriz` segue ativo. A antiga regra do campo `Rateio na Sion - Matriz` ligada a `Sobra para Favorecido` foi removida. Na COPEL, cooperados `Sion - Helexia PR` recebem energia pelo mesmo calculo e meta mensal da Matriz na aba `Sion - Matriz`. A aba `Helexia PR` conserva seu historico fechado e deixa de receber linhas novas.
 
 ### Janela de meses
 
@@ -159,7 +157,7 @@ Para PowerRev, o codigo busca uma fatura a mais antes do primeiro mes da janela,
 | L | Coeficiente | Coeficiente mensal calculado por meta de geracao, manual da Configuracao, contingencia ou alocacao especial. |
 | M | Novo Rateio | `max(previsao_do_mes_de_alteracao * L - K, 0)`, arredondado para inteiro. Se nao existir previsao para o mes A, usa H. |
 | N | Dia de emissao da fatura da distribuidora | Usa o dia da ultima `dtProximaLeitura` conhecida na PowerRev; fallback para ClickUp `c4f18991-f556-4019-af84-157c55aada63`. |
-| O | Favorecido | Favorecido original da task. |
+| O | Favorecido | Favorecido original da task. Na COPEL, Helexia PR continua escrito como `Sion - Helexia PR` na aba `Sion - Matriz`. |
 | P | UC Aneel | ClickUp `cd8687a7-0393-45b9-8292-f9b878b31512`; se vazio, escreve `Sem UC Aneel`. |
 | Q | Tensão | Grupo A ou B conforme o campo `Produto` da ClickUp. |
 | R | UC Âncora | Checkbox `UC Ancora` da ClickUp. |
@@ -194,6 +192,12 @@ Uma task nao aparece no rateio principal se cair em qualquer uma destas condicoe
 Status excluidos do rateio incluem, entre outros: `Cancelado - Autoconsumo`, `Planejamento - Black`, `Aguardando Cadastro`, `Aguardando Cadastro - Usina`, `Demitido`, `Excluido`, `Encerrado - Financeiro`, `Encerrado - Troca de Plano`, status de retirada/demissao/inadimplencia/black e `A Encerrar - Financeiro`. Qualquer status normalizado que comece com `aguardando cadastro ` tambem e excluido.
 
 Ha tambem status excluidos apenas da parte de projecao/calculo, que limpam H:I/J/K/L/M quando aplicavel: `Cancelado - Autoconsumo`, `Encerrado - Financeiro`, `Baixo Consumo`, status de retirada, `A Retirar da Usina - Black` e `A Encerrar - Financeiro`.
+
+### Isolamento COPEL / MONTE SIAO
+
+Na COPEL, linhas com Razao Social `MONTE SIAO COOPERATIVA DE ENERGIA` continuam aparecendo normalmente nas abas de rateio, mas ficam fora do rateio compartilhado. Elas nao entram na validacao de meta de geracao, no calculo do coeficiente global, no bloco de contingencia, na alocacao especial de sobra, na soma de `Novo Rateio` nem na diferenca mensal.
+
+Essas linhas ainda podem ter calculos proprios por UC, como saldo inicial, ultimo rateio historico e saldo final. O sync zera o impacto compartilhado deixando `Coeficiente` e `Novo Rateio` vazios para elas.
 
 ### Novo Cooperado
 
@@ -280,7 +284,6 @@ Coeficiente de contingencia padrao:
 | --- | --- |
 | AmE | `1.00000000` |
 | CELESC | `1.00000000` |
-| Energisa MS / Sion - Matriz | `1.00000000` |
 | Demais casos | `0.90000000` |
 
 Energisa MS / Sion - Helexia MS pode ter coeficiente de contingencia configurado na aba `Configuracao`.
@@ -324,7 +327,7 @@ Cabecalhos possiveis:
 | `Coeficiente Baixa Tensao <Favorecido>` | Coeficiente manual para cooperados de baixa tensao. |
 | `Coeficiente Alta Tensao <Favorecido>` | Coeficiente manual para cooperados de alta tensao. |
 
-Nas distribuidoras fora da COPEL, a contingencia prevalece sobre a tensao. Para os demais cooperados, o coeficiente de tensao preenchido prevalece sobre o coeficiente geral do favorecido. Quando ha coeficiente manual aplicavel e UCs com `UC Ancora` marcada na ClickUp, o restante da geracao mensal e dividido igualmente entre as ancoras elegiveis da mesma distribuidora e favorecido de rateio. Na COPEL, `Sion - Helexia PR` pertence ao grupo de rateio de `Sion - Matriz`. Sem coeficiente manual, segue o calculo automatico. Sem ancora elegivel, os coeficientes manuais continuam aplicados e a sobra fica sem destino; o log registra o caso. O checkbox fica visivel na coluna R da aba de rateio.
+Nas distribuidoras fora da COPEL, a contingencia prevalece sobre a tensao. Para os demais cooperados, o coeficiente de tensao preenchido prevalece sobre o coeficiente geral do favorecido. Quando ha coeficiente manual aplicavel e UCs com `UC Ancora` marcada na ClickUp, o restante da geracao mensal e dividido igualmente entre as ancoras elegiveis da mesma distribuidora e favorecido de rateio. Na COPEL, `Sion - Helexia PR` pertence ao grupo de rateio de `Sion - Matriz` e pode servir de ancora desse grupo. Sem coeficiente manual, segue o calculo automatico. Sem ancora elegivel, os coeficientes manuais continuam aplicados e a sobra fica sem destino; o log registra o caso. O checkbox fica visivel na coluna R da aba de rateio.
 
 A tensao usa o campo `Produto` da ClickUp: a opcao `Cooperativa Grupo A` e alta tensao; as opcoes de Grupo B sao baixa tensao.
 

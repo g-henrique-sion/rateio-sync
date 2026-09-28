@@ -105,7 +105,9 @@ def resolve_rateio_sheet_target(
 ) -> tuple[str, str]:
     target = RATEIO_SHEET_TARGETS.get(distributor_name) or {}
     spreadsheet_id = str(target.get("spreadsheet_id") or SPREADSHEET_ID).strip()
-    if favorecido is not None:
+    if distributor_name == "COPEL" and favorecido == "Sion - Helexia PR":
+        target_tab_name = RATEIO_FAVORECIDO_TABS["Sion - Matriz"]
+    elif favorecido is not None:
         target_tab_name = str(RATEIO_FAVORECIDO_TABS.get(favorecido) or "").strip()
         if not target_tab_name:
             raise ValueError(f"Favorecido sem aba configurada: {favorecido!r}")

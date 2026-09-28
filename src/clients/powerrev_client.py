@@ -74,7 +74,7 @@ _LAST_REQUEST_TS = 0.0
 
 _TZ_FALLBACK_LOGGED = False
 _SALDO_ITEM_IDS = {23, 24, 626}
-_SALDO_CACHE_VERSION = 2
+_SALDO_CACHE_VERSION = 3
 _BATCH_JOB_DONE_STATUSES = {"done", "success", "completed", "finished", "ready"}
 _BATCH_JOB_FAILED_STATUSES = {"failed", "error", "canceled", "cancelled"}
 
@@ -511,6 +511,7 @@ def fetch_invoices_for_month(reference_month: int | str) -> list[dict]:
             "invoiceId": invoice_id,
             "nuMesReferencia": str(month),
             "dtEmissao": str(item.get("dtEmissao") or "").strip(),
+            "dtProximaLeitura": str(item.get("dtProximaLeitura") or "").strip(),
             "updatedAt": str(item.get("dtAtualizacao") or "").strip(),
             "status": str(item.get("status", "")),
         })
@@ -578,12 +579,12 @@ def _save_persisted_saldo_cache() -> None:
         logger.warning("PowerRev: falha ao salvar cache persistente (%s).", exc)
 
 
-def _get_cached_invoice_fields(invoice_id: str, updated_at: str) -> tuple[bool, float | None, str]:
+def _get_cached_invoice_fields(invoice_id: str, updated_at: str) -> tuple[bool, float | None, str, str]:
     _load_persisted_saldo_cache()
 
     key = str(invoice_id).strip()
     if not key:
-        return False, None, ""
+        return False, None, "", ""
 
     local_entry = _INVOICE_SALDO_CACHE.get(key)
     if local_entry and _is_cache_entry_valid(local_entry, updated_at):
@@ -591,6 +592,7 @@ def _get_cached_invoice_fields(invoice_id: str, updated_at: str) -> tuple[bool, 
             True,
             _parse_number(local_entry.get("saldo23_24")),
             str(local_entry.get("dtEmissao") or "").strip(),
+            str(local_entry.get("dtProximaLeitura") or "").strip(),
         )
 
     persisted_entry = _PERSISTED_SALDO_CACHE.get(key)
@@ -600,13 +602,14 @@ def _get_cached_invoice_fields(invoice_id: str, updated_at: str) -> tuple[bool, 
             True,
             _parse_number(persisted_entry.get("saldo23_24")),
             str(persisted_entry.get("dtEmissao") or "").strip(),
+            str(persisted_entry.get("dtProximaLeitura") or "").strip(),
         )
 
-    return False, None, ""
+    return False, None, "", ""
 
 
 def _get_cached_saldo(invoice_id: str, updated_at: str) -> tuple[bool, float | None]:
-    hit, saldo, _dt_emissao = _get_cached_invoice_fields(invoice_id, updated_at)
+    hit, saldo, _dt_emissao, _dt_proxima_leitura = _get_cached_invoice_fields(invoice_id, updated_at)
     return hit, saldo
 
 
@@ -615,6 +618,7 @@ def _set_cached_saldo(
     updated_at: str,
     saldo: float | None,
     dt_emissao: str = "",
+    dt_proxima_leitura: str = "",
 ) -> None:
     global _PERSISTED_CACHE_DIRTY
     _load_persisted_saldo_cache()
@@ -630,6 +634,7 @@ def _set_cached_saldo(
     }
     if dt_emissao:
         entry["dtEmissao"] = dt_emissao
+    entry["dtProximaLeitura"] = dt_proxima_leitura
     _INVOICE_SALDO_CACHE[key] = entry
     _PERSISTED_SALDO_CACHE[key] = entry
     _PERSISTED_CACHE_DIRTY = True
@@ -693,11 +698,20 @@ def _extract_invoice_issue_date(payload: dict | None) -> str:
     return str(payload.get("dtEmissao") or "").strip()
 
 
-def _invoice_index_entry(month_ref: str, saldo, dt_emissao: str) -> dict[str, str]:
+def _extract_next_reading_date(payload: dict | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("dtProximaLeitura") or "").strip()
+
+
+def _invoice_index_entry(
+    month_ref: str, saldo, dt_emissao: str, dt_proxima_leitura: str = ""
+) -> dict[str, str]:
     return {
         "nuMesReferencia": _format_reference_month(month_ref),
         "saldo_23_24": _format_currency(saldo),
         "dtEmissao": str(dt_emissao or "").strip(),
+        "dtProximaLeitura": str(dt_proxima_leitura or "").strip(),
     }
 
 
@@ -945,34 +959,39 @@ def build_invoice_index_for_ucs(
         if current is None or _invoice_recency_key(inv) > _invoice_recency_key(current):
             target_invoice_by_uc[uc] = inv
 
-    pending_details: list[tuple[str, str, str, str, str]] = []
+    pending_details: list[tuple[str, str, str, str, str, str]] = []
     for uc, inv in target_invoice_by_uc.items():
         month_ref = str(inv.get("nuMesReferencia") or month)
         invoice_id = str(inv.get("invoiceId") or "").strip()
         list_issue_date = _extract_invoice_issue_date(inv)
+        list_next_reading = _extract_next_reading_date(inv)
         if not invoice_id:
-            result[uc] = _invoice_index_entry(month_ref, "", list_issue_date)
+            result[uc] = _invoice_index_entry(month_ref, "", list_issue_date, list_next_reading)
             continue
 
         updated_at = str(inv.get("updatedAt") or "").strip()
-        hit, cached_saldo, cached_issue_date = _get_cached_invoice_fields(invoice_id, updated_at)
+        hit, cached_saldo, cached_issue_date, cached_next_reading = _get_cached_invoice_fields(
+            invoice_id, updated_at
+        )
         if hit:
             details_cached += 1
             issue_date = list_issue_date or cached_issue_date
-            result[uc] = _invoice_index_entry(month_ref, cached_saldo, issue_date)
+            next_reading = list_next_reading or cached_next_reading
+            result[uc] = _invoice_index_entry(month_ref, cached_saldo, issue_date, next_reading)
             continue
 
-        pending_details.append((uc, invoice_id, month_ref, updated_at, list_issue_date))
+        pending_details.append((uc, invoice_id, month_ref, updated_at, list_issue_date, list_next_reading))
 
-    pending_records_by_invoice: dict[str, list[tuple[str, str, str, str]]] = {}
-    for uc, invoice_id, month_ref, updated_at, list_issue_date in pending_details:
+    pending_records_by_invoice: dict[str, list[tuple[str, str, str, str, str]]] = {}
+    for uc, invoice_id, month_ref, updated_at, list_issue_date, list_next_reading in pending_details:
         pending_records_by_invoice.setdefault(invoice_id, []).append(
-            (uc, month_ref, updated_at, list_issue_date)
+            (uc, month_ref, updated_at, list_issue_date, list_next_reading)
         )
     pending_invoice_ids = list(pending_records_by_invoice.keys())
 
     resolved_saldo_by_invoice: dict[str, float | None] = {}
     resolved_issue_date_by_invoice: dict[str, str] = {}
+    resolved_next_reading_by_invoice: dict[str, str] = {}
     unresolved_ids: list[str] = []
 
     if pending_invoice_ids and _USE_BATCH_EXPORT:
@@ -998,13 +1017,15 @@ def build_invoice_index_for_ucs(
                     unresolved_ids.append(invoice_id)
                     continue
                 saldo = _extract_saldo_23_24(detail)
-                _uc, _month_ref, updated_at, list_issue_date = pending_records_by_invoice[
+                _uc, _month_ref, updated_at, list_issue_date, list_next_reading = pending_records_by_invoice[
                     invoice_id
                 ][0]
                 issue_date = _extract_invoice_issue_date(detail) or list_issue_date
-                _set_cached_saldo(invoice_id, updated_at, saldo, issue_date)
+                next_reading = _extract_next_reading_date(detail) or list_next_reading
+                _set_cached_saldo(invoice_id, updated_at, saldo, issue_date, next_reading)
                 resolved_saldo_by_invoice[invoice_id] = saldo
                 resolved_issue_date_by_invoice[invoice_id] = issue_date
+                resolved_next_reading_by_invoice[invoice_id] = next_reading
                 details_ok += 1
 
             if _BATCH_EXPORT_JOB_PAUSE_S > 0 and start + _BATCH_EXPORT_IDS_PER_JOB < len(
@@ -1017,7 +1038,7 @@ def build_invoice_index_for_ucs(
     unresolved_ids = list(dict.fromkeys(unresolved_ids))
 
     if unresolved_ids:
-        # Dados de saldo e emissao sao obrigatorios. O fallback cobre tudo
+        # Dados de saldo e proxima leitura dependem do detalhe. O fallback cobre tudo
         # que o batch-export nao devolveu, independentemente do ambiente.
         fallback_limit = len(unresolved_ids)
 
@@ -1030,10 +1051,10 @@ def build_invoice_index_for_ucs(
             )
 
             for invoice_id in fallback_ids:
-                _uc, _month_ref, updated_at, list_issue_date = pending_records_by_invoice[
+                _uc, _month_ref, updated_at, list_issue_date, list_next_reading = pending_records_by_invoice[
                     invoice_id
                 ][0]
-                hit, cached_saldo, cached_issue_date = _get_cached_invoice_fields(
+                hit, cached_saldo, cached_issue_date, cached_next_reading = _get_cached_invoice_fields(
                     invoice_id,
                     updated_at,
                 )
@@ -1042,6 +1063,9 @@ def build_invoice_index_for_ucs(
                     resolved_issue_date_by_invoice[invoice_id] = (
                         list_issue_date or cached_issue_date
                     )
+                    resolved_next_reading_by_invoice[invoice_id] = (
+                        list_next_reading or cached_next_reading
+                    )
                     details_cached += 1
                     continue
 
@@ -1049,9 +1073,11 @@ def build_invoice_index_for_ucs(
                     detail = _fetch_invoice_detail(invoice_id)
                     saldo = _extract_saldo_23_24(detail)
                     issue_date = _extract_invoice_issue_date(detail) or list_issue_date
-                    _set_cached_saldo(invoice_id, updated_at, saldo, issue_date)
+                    next_reading = _extract_next_reading_date(detail) or list_next_reading
+                    _set_cached_saldo(invoice_id, updated_at, saldo, issue_date, next_reading)
                     resolved_saldo_by_invoice[invoice_id] = saldo
                     resolved_issue_date_by_invoice[invoice_id] = issue_date
+                    resolved_next_reading_by_invoice[invoice_id] = next_reading
                     details_ok += 1
                 except requests.RequestException:
                     logger.warning("PowerRev: falha ao buscar detalhe da fatura %s", invoice_id)
@@ -1061,12 +1087,14 @@ def build_invoice_index_for_ucs(
 
         details_failed += len(unresolved_ids)
 
-    for uc, invoice_id, month_ref, _updated_at, list_issue_date in pending_details:
+    for uc, invoice_id, month_ref, _updated_at, list_issue_date, list_next_reading in pending_details:
         issue_date = resolved_issue_date_by_invoice.get(invoice_id) or list_issue_date
+        next_reading = resolved_next_reading_by_invoice.get(invoice_id) or list_next_reading
         result[uc] = _invoice_index_entry(
             month_ref,
             resolved_saldo_by_invoice.get(invoice_id),
             issue_date,
+            next_reading,
         )
 
     _save_persisted_saldo_cache()
@@ -1103,6 +1131,7 @@ def build_invoice_index_for_ucs(
             str(inv.get("nuMesReferencia") or month),
             "",
             _extract_invoice_issue_date(inv),
+            _extract_next_reading_date(inv),
         )
 
     logger.info(

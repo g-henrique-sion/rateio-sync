@@ -21,6 +21,8 @@ _ROUTING_CF_ID = TAB_ROUTING["field_id"]
 _FAVORECIDO_CF_ID = "0a73e7b8-febe-4982-9263-06efd75612e1"
 _INVOICE_ISSUE_DAY_CF_ID = "c4f18991-f556-4019-af84-157c55aada63"
 _UC_ANEEL_CF_ID = "cd8687a7-0393-45b9-8292-f9b878b31512"
+_ALTA_TENSAO_CF_ID = "62193781-2249-49c1-a95d-80df43d66971"
+_UC_ANCORA_CF_ID = "b6dc5979-ad55-41b4-9f05-5f5f5c9ce2cd"
 
 
 def normalize_uc(value) -> str:
@@ -221,6 +223,27 @@ def extract_task_uc_aneel(task: dict) -> str:
     return _get_cf_value(task, _UC_ANEEL_CF_ID).strip()
 
 
+def extract_task_tensao(task: dict) -> str:
+    """Classify voltage from the ClickUp Produto dropdown option."""
+    cf = _get_custom_field(task, _ALTA_TENSAO_CF_ID)
+    value = cf.get("value") if cf else None
+    if isinstance(value, dict):
+        value = value.get("value", value.get("name", value.get("id")))
+    label = _resolve_dropdown_value(_ALTA_TENSAO_CF_ID, value, cf)
+    return "Alta Tensão" if "grupo a" in label.casefold() else "Baixa Tensão"
+
+
+def extract_task_uc_ancora(task: dict) -> bool:
+    """Return whether the UC Ancora checkbox is checked in ClickUp."""
+    cf = _get_custom_field(task, _UC_ANCORA_CF_ID)
+    if cf is None:
+        return False
+    value = cf.get("value")
+    if isinstance(value, str):
+        return value.strip().casefold() in {"true", "1"}
+    return value is True or value == 1
+
+
 def extract_task_uc_match_candidates(task: dict) -> list[str]:
     """Return ordered UC candidates for lookups and matching."""
     candidates: list[str] = []
@@ -244,6 +267,8 @@ def slim_task(task: dict) -> dict:
     needed_cf_ids.add(_FAVORECIDO_CF_ID)
     needed_cf_ids.add(_INVOICE_ISSUE_DAY_CF_ID)
     needed_cf_ids.add(_UC_ANEEL_CF_ID)
+    needed_cf_ids.add(_ALTA_TENSAO_CF_ID)
+    needed_cf_ids.add(_UC_ANCORA_CF_ID)
 
     slim_cfs = [
         cf for cf in task.get("custom_fields", [])

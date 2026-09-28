@@ -448,6 +448,30 @@ def _resize_rows(
     ws.row_count = row_count
 
 
+def _resize_columns(
+    ws: WorksheetHandle,
+    column_count: int,
+    *,
+    spreadsheet_id: str | None = None,
+) -> None:
+    body = {
+        "requests": [
+            {
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": ws.sheet_id,
+                        "gridProperties": {"columnCount": column_count},
+                    },
+                    "fields": "gridProperties.columnCount",
+                }
+            }
+        ]
+    }
+    sid = spreadsheet_id or ws.spreadsheet_id
+    _request_json("POST", f"{_sheets_base_url(sid)}:batchUpdate", payload=body)
+    ws.col_count = column_count
+
+
 def remove_all_protected_ranges(spreadsheet_id: str) -> int:
     """Remove every protected range from every tab in a spreadsheet."""
     sid = str(spreadsheet_id or "").strip()
