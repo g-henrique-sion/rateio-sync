@@ -131,7 +131,7 @@ As abas de saida do rateio sao separadas por distribuidora e favorecido:
 
 O rateio de `Sion - Matriz` segue ativo. A antiga regra do campo `Rateio na Sion - Matriz` ligada a `Sobra para Favorecido` foi removida.
 
-Na COPEL, cooperados com Favorecido original `Sion - Helexia PR` participam do mesmo calculo e da mesma meta de geracao de `Sion - Matriz`. A coluna O preserva o Favorecido original. A aba antiga `Helexia PR` conserva apenas seu historico fechado. Se houver coeficiente manual para a Matriz e UCs Ancora marcadas na ClickUp, a sobra da Matriz pode ser distribuida a essas UCs, inclusive as de Favorecido original Helexia PR.
+Na COPEL, cooperados com Favorecido original `Sion - Helexia PR` participam do mesmo calculo e da mesma meta de geracao de `Sion - Matriz`. A coluna O preserva o Favorecido original. A aba antiga `Helexia PR` conserva apenas seu historico fechado. Para a Matriz, o coeficiente manual da coluna `Coeficiente Sion - Matriz` prevalece; quando essa celula contem formula ou esta vazia, o valor numerico de `Coeficiente base especial` serve como coeficiente base. A sobra da Matriz define um coeficiente comum para as UCs Ancora marcadas na ClickUp, inclusive as de Favorecido original Helexia PR; o Novo Rateio de cada ancora e calculado com a mesma formula usada pelas demais UCs. Meses fechados permanecem intactos.
 
 ### Janela de meses
 
@@ -173,7 +173,7 @@ O codigo usa candidatos ordenados para match:
 2. UC Aneel: cd8687a7-0393-45b9-8292-f9b878b31512
 ```
 
-Essa lista e usada para consultas de PowerRev, projecao de consumo e localizacao de linhas existentes no delta. A normalizacao principal do rateio remove hifen e espacos de borda; alguns scripts utilitarios usam normalizacao mais agressiva, mantendo apenas numeros.
+Essa lista e usada para consultas de PowerRev, projecao de consumo, historico de rateio, saldo e rateio do mes anterior, formularios e localizacao de linhas existentes no delta. Nas linhas da planilha, a busca usa as colunas D (UC) e P (UC Aneel) nos dois sentidos: tenta um identificador e, se nao encontrar o dado, tenta o outro. A normalizacao das chaves de busca considera apenas digitos e ignora zeros iniciais; o valor exibido na planilha nao e alterado por isso.
 
 ### Filtros que impedem a linha de aparecer
 
@@ -293,7 +293,7 @@ Formula logica por linha:
 M = max(previsao_consumo_do_mes_A * L - K, 0)
 ```
 
-A previsao usada em M tenta buscar `(UC, mes A)` na `Projecao de Consumo`. Se nao existir, usa H, que e a previsao do mes G. O valor final de M e arredondado para inteiro.
+A previsao usada em M tenta buscar `(UC, mes A)` na `Projecao de Consumo` usando UC e UC Aneel. Somente se nenhuma das duas encontrar a previsao usa H, que e a previsao do mes G. O valor final de M e arredondado para inteiro.
 
 ### Meta mensal de geracao
 
@@ -324,7 +324,7 @@ Cabecalhos possiveis:
 | `Coeficiente Baixa Tensao <Favorecido>` | Coeficiente manual para cooperados de baixa tensao. |
 | `Coeficiente Alta Tensao <Favorecido>` | Coeficiente manual para cooperados de alta tensao. |
 
-Nas distribuidoras fora da COPEL, a contingencia prevalece sobre a tensao. Para os demais cooperados, o coeficiente de tensao preenchido prevalece sobre o coeficiente geral do favorecido. Quando ha coeficiente manual aplicavel e UCs com `UC Ancora` marcada na ClickUp, o restante da geracao mensal e dividido igualmente entre as ancoras elegiveis da mesma distribuidora e favorecido de rateio. Na COPEL, `Sion - Helexia PR` pertence ao grupo de rateio de `Sion - Matriz`. Sem coeficiente manual, segue o calculo automatico. Sem ancora elegivel, os coeficientes manuais continuam aplicados e a sobra fica sem destino; o log registra o caso. O checkbox fica visivel na coluna R da aba de rateio.
+Nas distribuidoras fora da COPEL, a contingencia prevalece sobre a tensao. Para os demais cooperados, o coeficiente de tensao preenchido prevalece sobre o coeficiente geral do favorecido. Quando ha coeficiente manual aplicavel e UCs com `UC Ancora` marcada na ClickUp, o restante da geracao mensal define um coeficiente comum para as ancoras elegiveis da mesma distribuidora e favorecido de rateio. O Novo Rateio de cada ancora segue a mesma formula das demais UCs: `max(consumo projetado * coeficiente - saldo K, 0)`, arredondado para kWh inteiro. Na COPEL, `Sion - Helexia PR` pertence ao grupo de rateio de `Sion - Matriz`. Sem coeficiente manual, segue o calculo automatico. Sem ancora elegivel, os coeficientes manuais continuam aplicados e a sobra fica sem destino; o log registra o caso. O checkbox fica visivel na coluna R da aba de rateio.
 
 A tensao usa o campo `Produto` da ClickUp: a opcao `Cooperativa Grupo A` e alta tensao; as opcoes de Grupo B sao baixa tensao.
 

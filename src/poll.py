@@ -949,10 +949,11 @@ def _update_frozen_tensao_columns(
 ) -> None:
     """Update only Q on historical rows for cooperados changed in ClickUp."""
     tensao_by_target_uc = {
-        (target, _normalize_uc_match_key(extract_task_uc(task))): extract_task_tensao(task)
+        (target, uc_key): extract_task_tensao(task)
         for task in tasks
         for target in (_resolve_task_rateio_target(task),)
-        if target is not None and extract_task_uc(task)
+        if target is not None
+        for uc_key in _uc_match_keys(*extract_task_uc_match_candidates(task))
     }
     if not tensao_by_target_uc:
         return
@@ -961,9 +962,12 @@ def _update_frozen_tensao_columns(
         frozen_months = frozen_months_by_distributor[target[0]]
         changes = []
         for offset, row in enumerate(rows):
-            uc = _normalize_uc_match_key(row[3] if len(row) > 3 else "")
-            key = (target, uc)
-            if key not in tensao_by_target_uc or not _is_reference_month_frozen(
+            key = next(
+                ((target, uc_key) for uc_key in _rateio_row_uc_keys(row)
+                 if (target, uc_key) in tensao_by_target_uc),
+                None,
+            )
+            if key is None or not _is_reference_month_frozen(
                 row[6] if len(row) > 6 else "",
                 current_month,
                 frozen_months,
@@ -994,10 +998,11 @@ def _update_frozen_uc_ancora_columns(
 ) -> None:
     """Keep the ClickUp checkbox visible on closed rows without recalculating them."""
     anchor_by_target_uc = {
-        (target, _normalize_uc_match_key(extract_task_uc(task))): extract_task_uc_ancora(task)
+        (target, uc_key): extract_task_uc_ancora(task)
         for task in tasks
         for target in (_resolve_task_rateio_target(task),)
-        if target is not None and extract_task_uc(task)
+        if target is not None
+        for uc_key in _uc_match_keys(*extract_task_uc_match_candidates(task))
     }
     if not anchor_by_target_uc:
         return
@@ -1006,9 +1011,12 @@ def _update_frozen_uc_ancora_columns(
         frozen_months = frozen_months_by_distributor[target[0]]
         changes = []
         for offset, row in enumerate(rows):
-            uc = _normalize_uc_match_key(row[3] if len(row) > 3 else "")
-            key = (target, uc)
-            if key not in anchor_by_target_uc or not _is_reference_month_frozen(
+            key = next(
+                ((target, uc_key) for uc_key in _rateio_row_uc_keys(row)
+                 if (target, uc_key) in anchor_by_target_uc),
+                None,
+            )
+            if key is None or not _is_reference_month_frozen(
                 row[6] if len(row) > 6 else "",
                 current_month,
                 frozen_months,
@@ -1274,7 +1282,7 @@ def _apply_k_l_m_targets(
         r["frozen"] = bool(frozen)
         if r.get("skip_calc") or frozen:
             continue
-        if not r.get("uc") or not r.get("month_ref") or not r.get("rateio_month"):
+        if not (r.get("uc_keys") or _uc_match_keys(r.get("uc", ""), r.get("uc_aneel", ""))) or not r.get("month_ref") or not r.get("rateio_month"):
             continue
         rateio_month = _normalize_month_reference_any(r["rateio_month"])
         if not rateio_month:
@@ -1301,27 +1309,26 @@ def _apply_k_l_m_targets(
         adjustable_rows: list[dict] = []
 
         for r in month_rows:
-            uc_key = _normalize_uc_match_key(r.get("uc", ""))
+            uc_keys = r.get("uc_keys") or _uc_match_keys(r.get("uc", ""), r.get("uc_aneel", ""))
             month_ref_norm = _normalize_month_reference_any(r.get("month_ref", ""))
-            key = (uc_key, month_ref_norm)
-            prev_key = (uc_key, _previous_month_reference(month_ref_norm))
+            previous_month = _previous_month_reference(month_ref_norm)
             history_month = _history_month_for_last_rateio(
                 rateio_month=rateio_month,
                 month_ref=month_ref_norm,
                 invoice_issue_day=r.get("invoice_issue_day"),
                 invoice_issue_day_threshold=history_invoice_issue_day_threshold,
             )
-            history_key = (uc_key, history_month)
 
             history_j = ""
             if last_rateio_index is not None:
-                history_j = str(last_rateio_index.get(history_key, "")).strip()
+                history_value = _uc_month_value(last_rateio_index, uc_keys, history_month)
+                history_j = "" if history_value is None else str(history_value).strip()
 
             if history_j:
                 j_value = _to_decimal(history_j) or Decimal("0")
                 r["j_target"] = j_value
             else:
-                previous_m = m_by_key.get(history_key)
+                previous_m = _uc_month_value(m_by_key, uc_keys, history_month)
                 if previous_m is None:
                     j_value = Decimal("0")
                     r["j_target"] = ""
@@ -1336,7 +1343,7 @@ def _apply_k_l_m_targets(
                 saldo_base = max(source_i, Decimal("0"))
                 r["i_target"] = saldo_base
             else:
-                previous_k = k_by_key.get(prev_key)
+                previous_k = _uc_month_value(k_by_key, uc_keys, previous_month)
                 if previous_k is None:
                     saldo_base = Decimal("0")
                     r["i_target"] = ""
@@ -1380,10 +1387,9 @@ def _apply_k_l_m_targets(
                 rr["l_target"] = ""
                 rr["m_target"] = ""
                 rr["_m_int"] = Decimal("0")
-                uc_key = _normalize_uc_match_key(rr.get("uc", ""))
+                uc_keys = rr.get("uc_keys") or _uc_match_keys(rr.get("uc", ""), rr.get("uc_aneel", ""))
                 month_ref_norm = _normalize_month_reference_any(rr.get("month_ref", ""))
-                if uc_key and month_ref_norm:
-                    k_by_key[(uc_key, month_ref_norm)] = rr.get("k_target", Decimal("0"))
+                _index_uc_month(k_by_key, uc_keys, month_ref_norm, rr.get("k_target", Decimal("0")))
             continue
         goal_value = goal if goal is not None else Decimal("0")
         goal_int = Decimal(max(int(goal_value), 0))
@@ -1447,8 +1453,8 @@ def _apply_k_l_m_targets(
 
         def _matches_remainder_rule(rr: dict, rule: dict[str, str | Decimal]) -> bool:
             remainder_uc = str(rule.get("remainder_uc") or "").strip()
-            return bool(remainder_uc) and (
-                _normalize_uc_match_key(rr.get("uc", "")) == _normalize_uc_match_key(remainder_uc)
+            return bool(remainder_uc) and _normalize_uc_match_key(remainder_uc) in (
+                rr.get("uc_keys") or _uc_match_keys(rr.get("uc", ""), rr.get("uc_aneel", ""))
             )
 
         def _m_consumption_for_row(rr: dict) -> Decimal:
@@ -1626,18 +1632,22 @@ def _apply_k_l_m_targets(
                     rr["l_target"] = coef
                     rr["m_target"] = _m_int_for_row(rr, coef)
                 available = max(0, int(goal_int - fixed_sum_int - base_sum_int))
-                share, extra = divmod(available, len(anchors))
-                for index, rr in enumerate(anchors):
-                    m_int = Decimal(share + (1 if index < extra else 0))
-                    rr["m_target"] = m_int
-                    rr["l_target"] = _coef_for_direct_m(rr, m_int)
+                anchor_coef, total_with_anchors = _best_coef_under_goal(
+                    anchors,
+                    base_total=fixed_sum_int + base_sum_int,
+                )
+                for rr in anchors:
+                    rr["l_target"] = anchor_coef
+                    rr["m_target"] = _m_int_for_row(rr, anchor_coef)
                 anchor_applied = True
                 logger.info(
-                    "Rateio '%s' mes %s: %d kWh de sobra distribuidos entre %d UCs Ancora.",
+                    "Rateio '%s' mes %s: %d de %d kWh de sobra distribuidos entre %d UCs Ancora (coeficiente=%s).",
                     sheet_label,
                     rateio_month,
+                    max(0, int(total_with_anchors - fixed_sum_int - base_sum_int)),
                     available,
                     len(anchors),
+                    _format_decimal_plain(anchor_coef),
                 )
             elif not anchors:
                 logger.warning(
@@ -1703,13 +1713,12 @@ def _apply_k_l_m_targets(
             else:
                 rr["_m_int"] = Decimal(_decimal_to_int_half_up(rr.get("m_target", Decimal("0"))))
                 rr["m_target"] = rr["_m_int"]
-            uc_key = _normalize_uc_match_key(rr.get("uc", ""))
+            uc_keys = rr.get("uc_keys") or _uc_match_keys(rr.get("uc", ""), rr.get("uc_aneel", ""))
             month_ref_norm = _normalize_month_reference_any(rr.get("month_ref", ""))
             rateio_month_norm = _normalize_month_reference_any(rr.get("rateio_month", ""))
-            if not rr.get("excluded_from_shared_rateio") and uc_key and rateio_month_norm:
-                m_by_key[(uc_key, rateio_month_norm)] = rr["_m_int"]
-            if uc_key and month_ref_norm:
-                k_by_key[(uc_key, month_ref_norm)] = rr.get("k_target", Decimal("0"))
+            if not rr.get("excluded_from_shared_rateio"):
+                _index_uc_month(m_by_key, uc_keys, rateio_month_norm, rr["_m_int"])
+            _index_uc_month(k_by_key, uc_keys, month_ref_norm, rr.get("k_target", Decimal("0")))
 
         total_consumo = Decimal("0")
         total_consumo_m = Decimal("0")
@@ -1841,7 +1850,7 @@ def _recalculate_k_l_m_with_monthly_goal(
             val_i = _to_decimal(i_raw)
             i_has_value = str(i_raw).strip() != ""
             current_j = str(row[9] if len(row) > 9 else "").strip()
-            uc_key = _normalize_uc_match_key(uc)
+            uc_keys = _rateio_row_uc_keys(row)
             val_j = _to_decimal(current_j)
             current_k = str(row[10] if len(row) > 10 else "").strip()
             current_k_num = _to_decimal(current_k)
@@ -1862,16 +1871,18 @@ def _recalculate_k_l_m_with_monthly_goal(
                 rateio_month_norm,
                 projection_index,
                 h_value,
+                uc_aneel=row[_UC_ANEEL_OUTPUT_COL_INDEX] if len(row) > _UC_ANEEL_OUTPUT_COL_INDEX else "",
             )
-            if uc_key and rateio_month_norm and current_m_num is not None:
-                existing_m_by_key[(uc_key, rateio_month_norm)] = current_m_num
-            if uc_key and month_ref_norm and current_k_num is not None:
-                existing_k_by_key[(uc_key, month_ref_norm)] = current_k_num
+            if current_m_num is not None:
+                _index_uc_month(existing_m_by_key, uc_keys, rateio_month_norm, current_m_num)
+            if current_k_num is not None:
+                _index_uc_month(existing_k_by_key, uc_keys, month_ref_norm, current_k_num)
 
             parsed = {
                 "row_idx": row_idx,
                 "status": status_value,
                 "uc": uc,
+                "uc_keys": uc_keys,
                 "razao_social": razao_social,
                 "month_ref": month_ref,
                 "rateio_month": _normalize_month_reference_any(rateio_month),
@@ -1919,7 +1930,7 @@ def _recalculate_k_l_m_with_monthly_goal(
                 continue
 
             # Linha vazia/invalida: limpa todo bloco calculado para evitar lixo historico.
-            if not uc or not month_ref or not parsed["rateio_month"]:
+            if not uc_keys or not month_ref or not parsed["rateio_month"]:
                 parsed["i_target"] = ""
                 parsed["j_target"] = ""
                 parsed["k_target"] = ""
@@ -1973,7 +1984,7 @@ def _recalculate_k_l_m_with_monthly_goal(
         # K sempre numÃƒÆ’Ã‚Â©rico para linhas vÃƒÆ’Ã‚Â¡lidas; vazio para invÃƒÆ’Ã‚Â¡lidas
         if (
             r.get("skip_calc")
-            or not r["uc"]
+            or not r.get("uc_keys")
             or not r["month_ref"]
             or not r.get("rateio_month")
         ):
@@ -2109,15 +2120,15 @@ def _recalculate_k_l_m_for_months(
         uc = normalize_uc(row[3] if len(row) > 3 else "")
         razao_social = str(row[5] if len(row) > 5 else "").strip()
         month_ref = str(row[6] if len(row) > 6 else "").strip()
-        uc_key_all = _normalize_uc_match_key(uc)
+        uc_keys = _rateio_row_uc_keys(row)
         month_ref_norm = _normalize_month_reference_any(month_ref)
         rateio_month_norm = _normalize_month_reference_any(rateio_month)
         existing_m = _to_decimal(row[12] if len(row) > 12 else "")
-        if uc_key_all and rateio_month_norm and existing_m is not None:
-            existing_m_by_key[(uc_key_all, rateio_month_norm)] = existing_m
+        if existing_m is not None:
+            _index_uc_month(existing_m_by_key, uc_keys, rateio_month_norm, existing_m)
         existing_k = _to_decimal(row[10] if len(row) > 10 else "")
-        if uc_key_all and month_ref_norm and existing_k is not None:
-            existing_k_by_key[(uc_key_all, month_ref_norm)] = existing_k
+        if existing_k is not None:
+            _index_uc_month(existing_k_by_key, uc_keys, month_ref_norm, existing_k)
 
         if month_ref not in months or _is_rateio_month_frozen(
             rateio_month_norm,
@@ -2148,12 +2159,14 @@ def _recalculate_k_l_m_for_months(
             rateio_month_norm,
             projection_index,
             h_value,
+            uc_aneel=row[_UC_ANEEL_OUTPUT_COL_INDEX] if len(row) > _UC_ANEEL_OUTPUT_COL_INDEX else "",
         )
 
         parsed = {
             "row_idx": row_idx,
             "status": status_value,
             "uc": uc,
+            "uc_keys": uc_keys,
             "razao_social": razao_social,
             "month_ref": month_ref,
             "rateio_month": _normalize_month_reference_any(rateio_month),
@@ -2188,7 +2201,7 @@ def _recalculate_k_l_m_for_months(
             "frozen": False,
         }
 
-        if not uc or not month_ref or not parsed["rateio_month"]:
+        if not uc_keys or not month_ref or not parsed["rateio_month"]:
             parsed["i_target"] = ""
             parsed["j_target"] = ""
             parsed["k_target"] = ""
@@ -2244,7 +2257,7 @@ def _recalculate_k_l_m_for_months(
         row_idx = int(r["row_idx"])
         if (
             r.get("skip_calc")
-            or not r["uc"]
+            or not r.get("uc_keys")
             or not r["month_ref"]
             or not r.get("rateio_month")
         ):
@@ -2358,6 +2371,41 @@ def _normalize_uc_match_key(value) -> str:
     if not digits:
         return ""
     return digits.lstrip("0") or "0"
+
+
+def _uc_match_keys(*values) -> list[str]:
+    """Return distinct UC keys in source order, including either identifier."""
+    keys: list[str] = []
+    for value in values:
+        key = _normalize_uc_match_key(value)
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def _rateio_row_uc_keys(row: list) -> list[str]:
+    """Use the displayed UC (D) and UC Aneel (P) for row lookups."""
+    return _uc_match_keys(
+        row[3] if len(row) > 3 else "",
+        row[_UC_ANEEL_OUTPUT_COL_INDEX] if len(row) > _UC_ANEEL_OUTPUT_COL_INDEX else "",
+    )
+
+
+def _uc_month_value(index: dict, uc_keys: list[str], month: str):
+    for uc_key in uc_keys:
+        key = (uc_key, month)
+        if key in index:
+            return index[key]
+    return None
+
+
+def _index_uc_month(index: dict, uc_keys: list[str], month: str, value) -> None:
+    if not month:
+        return
+    for position, uc_key in enumerate(uc_keys):
+        key = (uc_key, month)
+        if position == 0 or key not in index:
+            index[key] = value
 
 
 def _uc_lookup_keys(value) -> list[str]:
@@ -2804,7 +2852,16 @@ def _load_configured_coefficient_by_month(
         header_indexes,
         _configuration_coefficient_header(favorecido),
     )
-    if coef_index is None:
+    copel_base_index = (
+        _configuration_index(
+            header_indexes,
+            _RATEIO_CONFIGURATION_SPECIAL_BASE_HEADER,
+        )
+        if _distributor_for_rateio_spreadsheet(spreadsheet_id) == "COPEL"
+        and favorecido == "Sion - Matriz"
+        else None
+    )
+    if coef_index is None and copel_base_index is None:
         return {}
 
     result: dict[str, Decimal] = {}
@@ -2820,6 +2877,13 @@ def _load_configured_coefficient_by_month(
             formula_row,
             coef_index,
         )
+        if not coef_text and copel_base_index is not None:
+            coef_text = _config_numeric_cell_text(
+                row,
+                formatted_row,
+                formula_row,
+                copel_base_index,
+            )
         coef = _to_decimal(coef_text)
         if not rateio_month or coef is None:
             continue
@@ -3539,6 +3603,7 @@ def _build_last_rateio_index_from_rows(
     rows: list[list],
     *,
     uc_col: int,
+    uc_aneel_col: int | None = None,
     month_col: int,
     value_col: int,
     source_label: str,
@@ -3551,11 +3616,14 @@ def _build_last_rateio_index_from_rows(
             row[month_col] if len(row) > month_col else ""
         )
         value = _round_projection_value(row[value_col] if len(row) > value_col else "")
-        uc_key = _normalize_uc_match_key(row[uc_col] if len(row) > uc_col else "")
-        if not uc_key or not month_ref or not str(value).strip():
+        uc_keys = _uc_match_keys(
+            row[uc_col] if len(row) > uc_col else "",
+            row[uc_aneel_col] if uc_aneel_col is not None and len(row) > uc_aneel_col else "",
+        )
+        if not uc_keys or not month_ref or not str(value).strip():
             skipped += 1
             continue
-        result[(uc_key, month_ref)] = str(value).strip()
+        _index_uc_month(result, uc_keys, month_ref, str(value).strip())
 
     logger.info(
         "%s: %d pares UC+Mes carregados (%d linhas ignoradas).",
@@ -3593,6 +3661,7 @@ def _build_distributor_last_rateio_index(
     return _build_last_rateio_index_from_rows(
         rows,
         uc_col=0,
+        uc_aneel_col=1 if is_copel else None,
         month_col=4 if is_copel else 5,
         value_col=5 if is_copel else 7,
         source_label=f"Historico de Rateio {distributor_name}",
@@ -3867,11 +3936,12 @@ def _build_formulario_copel_rows(
         index = column_indexes[field]
         return row[index] if len(row) > index else ""
 
-    def _lookup_by_uc(index: dict[str, str], uc_value) -> str:
-        for key in _uc_lookup_keys(uc_value):
-            value = index.get(key, "")
-            if str(value or "").strip():
-                return value
+    def _lookup_by_uc(index: dict[str, str], *uc_values) -> str:
+        for uc_value in uc_values:
+            for key in _uc_lookup_keys(uc_value):
+                value = index.get(key, "")
+                if str(value or "").strip():
+                    return value
         return ""
 
     for source_row in rateio_rows:
@@ -3895,17 +3965,17 @@ def _build_formulario_copel_rows(
             continue
 
         project_key = _formulario_copel_project_key(source_usina)
-        razao_social = _lookup_by_uc(razao_social_by_uc, source_uc) or source_razao_social
+        razao_social = _lookup_by_uc(razao_social_by_uc, source_uc, source_uc_aneel) or source_razao_social
         output_row = [
             razao_social,
-            _lookup_by_uc(cpf_cnpj_by_uc, source_uc),
+            _lookup_by_uc(cpf_cnpj_by_uc, source_uc, source_uc_aneel),
             source_uc,
             source_percentual,
             uc_by_project_name.get(project_key, ""),
             source_usina,
             source_alteracao,
-            _lookup_by_uc(col_h_by_uc, source_uc) or source_uc_aneel,
-            _lookup_by_uc(address_by_uc, source_uc),
+            _lookup_by_uc(col_h_by_uc, source_uc, source_uc_aneel) or source_uc_aneel,
+            _lookup_by_uc(address_by_uc, source_uc, source_uc_aneel),
             uc_aneel_by_project_name.get(project_key, ""),
         ]
         rows.append(output_row)
@@ -4395,18 +4465,16 @@ def _new_rateio_consumption_for_alteracao_month(
     rateio_month: str,
     projection_index: dict[tuple[str, str], str] | None,
     fallback: Decimal,
+    *,
+    uc_aneel: str = "",
 ) -> Decimal:
-    """Projection used only by Novo Rateio (M): UC + Alteracao Rateio para o mes."""
+    """Projection for M, trying both identifiers before the H fallback."""
     month_ref = _normalize_month_reference_any(rateio_month)
-    if projection_index and uc and month_ref:
-        projected = _to_decimal(
-            projection_index.get(
-                (_normalize_projection_uc_key(uc), month_ref),
-                "",
-            )
-        )
-        if projected is not None:
-            return projected
+    if projection_index and month_ref:
+        for candidate in _uc_match_keys(uc, uc_aneel):
+            projected = _to_decimal(projection_index.get((candidate, month_ref), ""))
+            if projected is not None:
+                return projected
     return fallback
 
 
@@ -4491,10 +4559,14 @@ def _build_open_month_payload(
     previous_month = _previous_month_int(month)
     previous_invoice = {}
     for candidate in lookup_ucs or [uc]:
-        previous_invoice = invoice_by_month.get(previous_month, {}).get(
+        invoice = invoice_by_month.get(previous_month, {}).get(
             _normalize_uc_match_key(candidate)
         ) or {}
-        if previous_invoice:
+        if invoice and not previous_invoice:
+            previous_invoice = invoice
+        saldo = invoice.get("saldo_23_24") if invoice else None
+        if saldo is not None and str(saldo).strip() != "":
+            previous_invoice = invoice
             break
     reading_value = _latest_powerrev_next_reading_for_month(
         uc,
@@ -4545,10 +4617,9 @@ def _load_sheet_state() -> tuple[
         for i, row in enumerate(rows):
             if len(row) <= max(uc_col, month_col):
                 continue
-            uc = _normalize_uc_match_key(row[uc_col])
+            uc_keys = _rateio_row_uc_keys(row)
             month_ref = _normalize_month_reference(row[month_col])
-            if uc and month_ref:
-                uc_month_rows[(uc, month_ref)] = i + DATA_START_ROW
+            _index_uc_month(uc_month_rows, uc_keys, month_ref, i + DATA_START_ROW)
 
         worksheets[target] = ws
         uc_month_rows_by_target[target] = uc_month_rows
@@ -4570,10 +4641,10 @@ def _merge_frozen_and_open_rows(
     As linhas continuam agrupadas por UC: histórico congelado primeiro e meses
     futuros recalculados depois.
     """
-    uc_idx = COLUMN_ORDER.index("uc")
     month_idx = COLUMN_ORDER.index("mes_referencia")
     frozen_by_uc: dict[str, list[list]] = {}
     open_by_uc: dict[str, list[list]] = {}
+    group_by_uc_alias: dict[str, str] = {}
     uc_order: list[str] = []
     seen_ucs: set[str] = set()
 
@@ -4582,17 +4653,24 @@ def _merge_frozen_and_open_rows(
             seen_ucs.add(uc_key)
             uc_order.append(uc_key)
 
+    def _group_for(uc_keys: list[str]) -> str:
+        group = next((group_by_uc_alias[key] for key in uc_keys if key in group_by_uc_alias), uc_keys[0])
+        for key in uc_keys:
+            group_by_uc_alias[key] = group
+        return group
+
     frozen_count = 0
     for raw_row in existing_rows:
         row = list(raw_row or [])
-        uc_key = _normalize_uc_match_key(row[uc_idx] if uc_idx < len(row) else "")
+        uc_keys = _rateio_row_uc_keys(row)
         month_ref = row[month_idx] if month_idx < len(row) else ""
-        if not uc_key or not _is_reference_month_frozen(
+        if not uc_keys or not _is_reference_month_frozen(
             month_ref,
             current_month,
             frozen_rateio_months,
         ):
             continue
+        uc_key = _group_for(uc_keys)
         _register_uc(uc_key)
         if len(row) < _RATEIO_WRITE_COL_COUNT:
             row.extend([""] * (_RATEIO_WRITE_COL_COUNT - len(row)))
@@ -4601,14 +4679,15 @@ def _merge_frozen_and_open_rows(
 
     for raw_row in open_rows:
         row = list(raw_row or [])
-        uc_key = _normalize_uc_match_key(row[uc_idx] if uc_idx < len(row) else "")
+        uc_keys = _rateio_row_uc_keys(row)
         month_ref = row[month_idx] if month_idx < len(row) else ""
-        if not uc_key or _is_reference_month_frozen(
+        if not uc_keys or _is_reference_month_frozen(
             month_ref,
             current_month,
             frozen_rateio_months,
         ):
             continue
+        uc_key = _group_for(uc_keys)
         _register_uc(uc_key)
         if len(row) < _RATEIO_WRITE_COL_COUNT:
             row.extend([""] * (_RATEIO_WRITE_COL_COUNT - len(row)))
@@ -4634,7 +4713,6 @@ def _build_open_row_updates(
     Linhas abertas sao compactadas nos slots disponiveis, preservando apenas
     os meses fechados/congelados na posicao original.
     """
-    uc_idx = COLUMN_ORDER.index("uc")
     month_idx = COLUMN_ORDER.index("mes_referencia")
     blank_row = [""] * _RATEIO_WRITE_COL_COUNT
     all_open_slots: list[int] = []
@@ -4643,7 +4721,6 @@ def _build_open_row_updates(
     for offset, raw_row in enumerate(existing_rows):
         sheet_row = DATA_START_ROW + offset
         row = list(raw_row or [])
-        uc_key = _normalize_uc_match_key(row[uc_idx] if uc_idx < len(row) else "")
         month_ref = _normalize_month_reference(
             row[month_idx] if month_idx < len(row) else ""
         )
@@ -4668,12 +4745,12 @@ def _build_open_row_updates(
             row.extend([""] * (_RATEIO_WRITE_COL_COUNT - len(row)))
         row = row[:_RATEIO_WRITE_COL_COUNT]
 
-        uc_key = _normalize_uc_match_key(row[uc_idx] if uc_idx < len(row) else "")
+        uc_keys = _rateio_row_uc_keys(row)
         month_ref = _normalize_month_reference(
             row[month_idx] if month_idx < len(row) else ""
         )
         if (
-            not uc_key
+            not uc_keys
             or not month_ref
             or _is_reference_month_frozen(
                 month_ref,
@@ -4728,10 +4805,10 @@ def _open_reference_months_for_recalculation(
 ) -> set[str]:
     months: set[str] = set()
     for row in rows:
-        uc = _normalize_uc_match_key(row[3] if len(row) > 3 else "")
+        uc_keys = _rateio_row_uc_keys(row)
         month_ref = _normalize_month_reference_any(row[6] if len(row) > 6 else "")
         rateio_month = _normalize_month_reference_any(row[0] if row else "")
-        if not uc or not month_ref or not rateio_month:
+        if not uc_keys or not month_ref or not rateio_month:
             continue
         if _is_rateio_month_frozen(rateio_month, frozen_rateio_months):
             continue
@@ -4875,16 +4952,18 @@ def full_sync() -> None:
     _known_task_ids = {t.get("id", "") for t in tasks_raw if t.get("id")}
     tasks = _prioritize_tasks_by_uc(tasks_raw)
     tensao_by_target_uc = {
-        (target, _normalize_uc_match_key(extract_task_uc(task))): extract_task_tensao(task)
+        (target, uc_key): extract_task_tensao(task)
         for task in tasks
         for target in (_resolve_task_rateio_target(task),)
-        if target is not None and extract_task_uc(task)
+        if target is not None
+        for uc_key in _uc_match_keys(*extract_task_uc_match_candidates(task))
     }
     anchor_by_target_uc = {
-        (target, _normalize_uc_match_key(extract_task_uc(task))): extract_task_uc_ancora(task)
+        (target, uc_key): extract_task_uc_ancora(task)
         for task in tasks
         for target in (_resolve_task_rateio_target(task),)
-        if target is not None and extract_task_uc(task)
+        if target is not None
+        for uc_key in _uc_match_keys(*extract_task_uc_match_candidates(task))
     }
     current_month, months_window, invoice_by_month = _build_powerrev_indexes(tasks)
     projection_index = _build_projection_index()
@@ -5106,14 +5185,16 @@ def full_sync() -> None:
                 frozen_rateio_months=frozen_rateio_months,
             )
             for row in merged_rows:
-                uc_key = _normalize_uc_match_key(row[3] if len(row) > 3 else "")
-                if (target, uc_key) in tensao_by_target_uc or (target, uc_key) in anchor_by_target_uc:
+                row_keys = _rateio_row_uc_keys(row)
+                tensao_key = next(((target, key) for key in row_keys if (target, key) in tensao_by_target_uc), None)
+                anchor_key = next(((target, key) for key in row_keys if (target, key) in anchor_by_target_uc), None)
+                if tensao_key is not None or anchor_key is not None:
                     if len(row) < _RATEIO_WRITE_COL_COUNT:
                         row.extend([""] * (_RATEIO_WRITE_COL_COUNT - len(row)))
-                    if (target, uc_key) in tensao_by_target_uc:
-                        row[_TENSAO_OUTPUT_COL_INDEX] = tensao_by_target_uc[(target, uc_key)]
-                    if (target, uc_key) in anchor_by_target_uc:
-                        row[_UC_ANCORA_OUTPUT_COL_INDEX] = anchor_by_target_uc[(target, uc_key)]
+                    if tensao_key is not None:
+                        row[_TENSAO_OUTPUT_COL_INDEX] = tensao_by_target_uc[tensao_key]
+                    if anchor_key is not None:
+                        row[_UC_ANCORA_OUTPUT_COL_INDEX] = anchor_by_target_uc[anchor_key]
             changed_rows = sync_rows_in_place(
                 ws_local,
                 merged_rows,
