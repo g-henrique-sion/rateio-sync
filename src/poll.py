@@ -4172,7 +4172,11 @@ def _resolve_target_tab_from_distributor(distributor_name) -> str | None:
             alias_norm = _normalize_text(alias)
             if not alias_norm:
                 continue
-            if normalized == alias_norm or alias_norm in normalized:
+            if normalized == alias_norm:
+                return tab_name
+            # "ENERGISA" alone is ambiguous: substring matching also captures
+            # other distributors such as Energisa SS as Energisa MS.
+            if alias_norm != "ENERGISA" and alias_norm in normalized:
                 return tab_name
 
     return None
@@ -5014,6 +5018,7 @@ def full_sync() -> None:
             without_billing_plan += 1
             continue
         skip_projection = _is_status_excluded_from_projection(status_value)
+        uc_ancora = extract_task_uc_ancora(task)
 
         for month in months_window:
             rateio_month = format_reference_month(_add_months(month, 1))
@@ -5042,7 +5047,10 @@ def full_sync() -> None:
                 projection_index,
                 lookup_ucs=lookup_ucs,
             )
-            if not _has_projection_value(enriched_payload.get("projecao_consumo", "")):
+            if (
+                not uc_ancora
+                and not _has_projection_value(enriched_payload.get("projecao_consumo", ""))
+            ):
                 without_projection += 1
                 continue
 
@@ -5351,6 +5359,7 @@ def delta_sync(last_updated_ts: int) -> int:
             exclude_from_rateio = _is_status_excluded_from_rateio(status_value)
             exclude_from_plan = _is_plan_excluded_from_rateio(extract_task_plan(task))
             skip_projection = _is_status_excluded_from_projection(status_value)
+            uc_ancora = extract_task_uc_ancora(task)
 
             for month in months_window:
                 month_ref = format_reference_month(month)
@@ -5399,7 +5408,10 @@ def delta_sync(last_updated_ts: int) -> int:
                         projection_index,
                         lookup_ucs=lookup_ucs,
                     )
-                    if _has_projection_value(enriched_payload.get("projecao_consumo", "")):
+                    if (
+                        uc_ancora
+                        or _has_projection_value(enriched_payload.get("projecao_consumo", ""))
+                    ):
                         row_data = build_row(task, enriched_payload)
                         if skip_projection:
                             row_data = _clear_projection_and_balance_fields(row_data)
