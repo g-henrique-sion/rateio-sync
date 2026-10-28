@@ -1418,24 +1418,23 @@ def _apply_k_l_m_targets(
             target_rows: list[dict],
             *,
             base_total: Decimal,
-            max_coef: Decimal = Decimal("100.00"),
         ) -> tuple[Decimal, Decimal]:
             if not target_rows or base_total >= goal_int:
                 return Decimal("0.0000"), base_total
 
+            if not any(_m_consumption_for_row(rr) > 0 for rr in target_rows):
+                return Decimal("0.0000"), base_total
+
             precision = Decimal("100000000")
-            max_units = int(max_coef * precision)
             low = 0
-            high = min(int(Decimal("1.00000000") * precision), max_units)
-            while high < max_units:
+            high = int(Decimal("1.00000000") * precision)
+            while True:
                 coef = Decimal(high) / precision
                 total = _total_int_for_rows(target_rows, coef, base_total=base_total)
                 if total > goal_int:
                     break
                 low = high
-                high = min(high * 2, max_units)
-                if high == low:
-                    break
+                high *= 2
 
             high_coef = Decimal(high) / precision
             if _total_int_for_rows(target_rows, high_coef, base_total=base_total) <= goal_int:
