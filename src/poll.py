@@ -1121,10 +1121,24 @@ def _load_generation_projection_goal_by_month(
     spreadsheet_id: str,
     favorecido: str,
 ) -> dict[str, Decimal]:
-    total_columns = _GENERATION_TOTAL_COLUMNS.get(favorecido)
-    if total_columns is None:
+    distributor = _distributor_for_rateio_spreadsheet(spreadsheet_id)
+    source_favorecidos = tuple(
+        source_favorecido
+        for source_favorecido in _GENERATION_FAVORECIDOS_BY_DISTRIBUTOR.get(
+            distributor,
+            (favorecido,),
+        )
+        if _rateio_allocation_favorecido(distributor, source_favorecido) == favorecido
+    )
+    if not source_favorecidos:
+        source_favorecidos = (favorecido,)
+    projected_col_indexes = [
+        _GENERATION_TOTAL_COLUMNS[source_favorecido][0]
+        for source_favorecido in source_favorecidos
+        if source_favorecido in _GENERATION_TOTAL_COLUMNS
+    ]
+    if not projected_col_indexes:
         raise ValueError(f"Favorecido sem colunas de geração configuradas: {favorecido!r}")
-    projected_col_index, _consolidated_col_index = total_columns
 
     ws = _get_worksheet_with_aliases(
         spreadsheet_id,
@@ -1137,23 +1151,30 @@ def _load_generation_projection_goal_by_month(
     invalid = 0
 
     for row in rows:
-        # Esperado na aba Geracao Total:
-        # H=GeraÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o Total Mensal (ProjeÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o), J=MÃƒÆ’Ã‚Âªs de referÃƒÆ’Ã‚Âªncia (GeraÃƒÆ’Ã‚Â§ÃƒÆ’Ã‚Â£o Total)
+        # G/I/K sao as metas projetadas de Matriz/Helexia PR/Helexia MS;
+        # M contem o mes de referencia.
         month_ref = _normalize_month_reference(
             row[_GENERATION_TOTAL_MONTH_COL_INDEX]
             if len(row) > _GENERATION_TOTAL_MONTH_COL_INDEX
             else ""
         )
-        raw_goal = row[projected_col_index] if len(row) > projected_col_index else ""
-        goal = _to_decimal(raw_goal)
         if not month_ref:
             invalid += 1
             continue
-        # A sincronizacao de Geracao Total representa ausencia de geracao
-        # como celula vazia. Como a leitura foi bem-sucedida, esse caso e zero real.
-        if goal is None and not str(raw_goal if raw_goal is not None else "").strip():
-            goal = Decimal("0")
-        if goal is None:
+
+        goal = Decimal("0")
+        invalid_goal = False
+        for projected_col_index in projected_col_indexes:
+            raw_goal = row[projected_col_index] if len(row) > projected_col_index else ""
+            projected_goal = _to_decimal(raw_goal)
+            # Blank generation cells are zero after Geracao Total has synced.
+            if projected_goal is None and not str(raw_goal if raw_goal is not None else "").strip():
+                continue
+            if projected_goal is None:
+                invalid_goal = True
+                break
+            goal += projected_goal
+        if invalid_goal:
             invalid += 1
             continue
         goals[month_ref] = goal
@@ -4267,6 +4288,60 @@ def _read_projection_source_rows(
     return rows_by_tab[0], rows_by_tab[1]
 
 
+def _generation_rows_with_favorecido_in_legacy_column(
+    headers: list[str],
+    rows: list[list[str]],
+) -> list[list[str]]:
+    favored_col_index = next(
+        (
+            index
+            for index, header in enumerate(headers)
+            if _normalize_text(header) == "FAVORECIDO"
+        ),
+        7,
+    )
+    normalized_rows: list[list[str]] = []
+    for source_row in rows:
+        row = list(source_row or [])
+        favorecido = row[favored_col_index] if len(row) > favored_col_index else ""
+        if len(row) <= 7:
+            row.extend([""] * (8 - len(row)))
+        row[7] = favorecido
+        normalized_rows.append(row)
+    return normalized_rows
+
+
+def _read_generation_projection_source_rows(
+    primary_tab: str,
+    year_2027_tab: str,
+    primary_aliases: tuple[str, ...],
+    year_2027_aliases: tuple[str, ...],
+) -> tuple[list[list[str]], list[list[str]]]:
+    rows_by_tab: list[list[list[str]]] = []
+    for tab_name, aliases in (
+        (primary_tab, primary_aliases),
+        (year_2027_tab, year_2027_aliases),
+    ):
+        worksheet = _get_worksheet_with_aliases(
+            PROJECTION_SPREADSHEET_ID,
+            tab_name,
+            aliases,
+        )
+        header_rows = _values_get(
+            worksheet,
+            "A1:Z1",
+            spreadsheet_id=PROJECTION_SPREADSHEET_ID,
+        )
+        stats.sheets_read_requests += 1
+        headers = header_rows[0] if header_rows else []
+        rows = read_all_rows(
+            worksheet,
+            spreadsheet_id=PROJECTION_SPREADSHEET_ID,
+        )
+        rows_by_tab.append(_generation_rows_with_favorecido_in_legacy_column(headers, rows))
+    return rows_by_tab[0], rows_by_tab[1]
+
+
 def _generation_projection_source_key(row: list[str]) -> tuple[str, str, str, str] | None:
     month_ref = _normalize_month_reference(row[4] if len(row) > 4 else "")
     uc = _normalize_projection_uc_key(row[2] if len(row) > 2 else "")
@@ -4282,7 +4357,7 @@ def _build_generation_rows_by_tab() -> dict[str, list[list[str]]]:
     if not PROJECTION_SPREADSHEET_ID.strip():
         return rows_by_tab
 
-    primary_rows, year_2027_rows = _read_projection_source_rows(
+    primary_rows, year_2027_rows = _read_generation_projection_source_rows(
         PROJECTION_GENERATION_SHEET_TAB,
         PROJECTION_GENERATION_2027_SHEET_TAB,
         ("Projeção de Geração", "Projecao de Geracao"),

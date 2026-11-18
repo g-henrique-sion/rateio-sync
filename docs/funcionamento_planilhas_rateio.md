@@ -310,6 +310,8 @@ A meta do calculo vem da aba `Geracao Total` da planilha da distribuidora. Para 
 
 O mes da meta e lido na coluna M da aba `Geracao Total`.
 
+Na COPEL, a meta usada pelo rateio `Sion - Matriz` soma a geracao projetada de `Sion - Matriz` (G) e `Sion - Helexia PR` (I), pois as UCs Helexia PR sao alocadas na aba e no grupo de rateio da Matriz. As colunas permanecem separadas para consulta na `Geracao Total`.
+
 Antes de escrever o rateio, o full sync confere as metas de geracao dos meses necessarios. Se faltar meta para algum mes aberto, registra um aviso e deixa L/M vazios nesse mes.
 
 ## Aba Configuracao
