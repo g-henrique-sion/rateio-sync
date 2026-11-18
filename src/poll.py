@@ -29,6 +29,8 @@ from src.config import (
     PROJECTION_SPREADSHEET_ID,
     PROJECTION_SHEET_TAB,
     PROJECTION_GENERATION_SHEET_TAB,
+    PROJECTION_2027_SHEET_TAB,
+    PROJECTION_GENERATION_2027_SHEET_TAB,
     RATEIO_GENERATION_SHEET_TAB,
     RATEIO_FAVORECIDO_TABS,
     PROJECTION_ROUND_DECIMALS,
@@ -4242,17 +4244,61 @@ def _run_sheets_step_with_retry(step_label: str, fn: Callable[[], _T]) -> _T:
             time.sleep(wait_s)
 
 
+def _read_projection_source_rows(
+    primary_tab: str,
+    year_2027_tab: str,
+    primary_aliases: tuple[str, ...],
+    year_2027_aliases: tuple[str, ...],
+) -> tuple[list[list[str]], list[list[str]]]:
+    rows_by_tab: list[list[list[str]]] = []
+    for tab_name, aliases in (
+        (primary_tab, primary_aliases),
+        (year_2027_tab, year_2027_aliases),
+    ):
+        worksheet = _get_worksheet_with_aliases(
+            PROJECTION_SPREADSHEET_ID,
+            tab_name,
+            aliases,
+        )
+        rows_by_tab.append(
+            read_all_rows(worksheet, spreadsheet_id=PROJECTION_SPREADSHEET_ID)
+        )
+    return rows_by_tab[0], rows_by_tab[1]
+
+
+def _generation_projection_source_key(row: list[str]) -> tuple[str, str, str, str] | None:
+    month_ref = _normalize_month_reference(row[4] if len(row) > 4 else "")
+    uc = _normalize_projection_uc_key(row[2] if len(row) > 2 else "")
+    distributor = _normalize_text(row[3] if len(row) > 3 else "")
+    plant = _normalize_text(row[0] if len(row) > 0 else "")
+    if not month_ref or not (uc or plant):
+        return None
+    return uc, month_ref, distributor, plant
+
+
 def _build_generation_rows_by_tab() -> dict[str, list[list[str]]]:
     rows_by_tab: dict[str, list[list[str]]] = {tab: [] for tab in TARGET_SHEET_TABS}
     if not PROJECTION_SPREADSHEET_ID.strip():
         return rows_by_tab
 
-    source_ws = _get_worksheet_with_aliases(
-        PROJECTION_SPREADSHEET_ID,
+    primary_rows, year_2027_rows = _read_projection_source_rows(
         PROJECTION_GENERATION_SHEET_TAB,
-        ("ProjeÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o de GeraÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o", "Projecao de Geracao"),
+        PROJECTION_GENERATION_2027_SHEET_TAB,
+        ("Projeção de Geração", "Projecao de Geracao"),
+        ("Projecao de Geracao_2027",),
     )
-    source_rows = read_all_rows(source_ws, spreadsheet_id=PROJECTION_SPREADSHEET_ID)
+    year_2027_keys = {
+        key
+        for row in year_2027_rows
+        if (key := _generation_projection_source_key(row)) is not None
+    }
+    # A linha da aba anual prevalece quando a mesma usina/UC/distribuidora/mês
+    # também aparece na aba histórica, evitando somar a projeção duas vezes.
+    source_rows = [
+        row
+        for row in primary_rows
+        if _generation_projection_source_key(row) not in year_2027_keys
+    ] + year_2027_rows
 
     ignored_without_distributor = 0
     ignored_without_favorecido = 0
@@ -4417,27 +4463,30 @@ def _build_projection_index() -> dict[tuple[str, str], str]:
     if not PROJECTION_SPREADSHEET_ID.strip():
         return {}
 
-    ws = _get_worksheet_with_aliases(
-        PROJECTION_SPREADSHEET_ID,
+    primary_rows, year_2027_rows = _read_projection_source_rows(
         PROJECTION_SHEET_TAB,
-        ("ProjeÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o de Consumo", "Projecao de Consumo"),
+        PROJECTION_2027_SHEET_TAB,
+        ("Projeção de Consumo", "Projecao de Consumo"),
+        ("Projecao de Consumo_2027",),
     )
-    rows = read_all_rows(ws, spreadsheet_id=PROJECTION_SPREADSHEET_ID)
 
     projection: dict[tuple[str, str], str] = {}
-    for row in rows:
-        if len(row) <= 5:
-            continue
+    for rows in (primary_rows, year_2027_rows):
+        for row in rows:
+            if len(row) <= 5:
+                continue
 
-        uc = _normalize_projection_uc_key(row[2] if len(row) > 2 else "")
-        month_ref = _normalize_month_reference(row[5] if len(row) > 5 else "")
-        value_g = _round_projection_value(row[6] if len(row) > 6 else "")
-        value_h = _round_projection_value(row[7] if len(row) > 7 else "")
-        value = value_g if str(value_g).strip() else value_h
+            uc = _normalize_projection_uc_key(row[2] if len(row) > 2 else "")
+            month_ref = _normalize_month_reference(row[5] if len(row) > 5 else "")
+            value_g = _round_projection_value(row[6] if len(row) > 6 else "")
+            value_h = _round_projection_value(row[7] if len(row) > 7 else "")
+            value = value_g if str(value_g).strip() else value_h
 
-        if not uc or not month_ref:
-            continue
-        projection[(uc, month_ref)] = value
+            if not uc or not month_ref:
+                continue
+            # A aba _2027 vem por último e substitui uma eventual linha antiga
+            # para a mesma UC e mês.
+            projection[(uc, month_ref)] = value
 
     logger.info(
         "ProjeÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â£o de Consumo: %d pares UC+MÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Âªs referÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Âªncia carregados da planilha externa.",

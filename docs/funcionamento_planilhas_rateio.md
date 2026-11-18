@@ -104,8 +104,8 @@ A planilha externa de projecoes alimenta duas coisas diferentes:
 
 | Aba | Uso |
 | --- | --- |
-| `Projecao de Consumo` | Fonte da coluna H do rateio e tambem base alternativa para a coluna M no mes de alteracao. |
-| `Projecao de Geracao` | Fonte da aba `Geracao Total`, que por sua vez define a meta mensal usada para calcular coeficiente e novo rateio. |
+| `Projecao de Consumo` e `Projecao de Consumo_2027` | Fontes da coluna H do rateio e tambem base alternativa para a coluna M no mes de alteracao. Se a mesma UC e mes aparecer nas duas, a aba `_2027` prevalece. |
+| `Projecao de Geracao` e `Projecao de Geracao_2027` | Fontes da aba `Geracao Total`, que por sua vez define a meta mensal usada para calcular coeficiente e novo rateio. Se a mesma usina/UC/distribuidora/mes aparecer nas duas, a aba `_2027` prevalece. |
 
 Na `Projecao de Consumo`, o indice e `(UC normalizada, Mes de referencia)`. O codigo le:
 
