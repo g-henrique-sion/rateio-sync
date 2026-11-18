@@ -225,6 +225,7 @@ _RATEIO_CONFIGURATION_SPECIAL_BASE_HEADER = "Coeficiente base especial"
 _RATEIO_CONFIGURATION_REMAINDER_UC_HEADER = "Sobra para UC"
 _RATEIO_CONFIGURATION_CONTINGENCY_PREFIX = "Coeficiente Contingencia"
 _RATEIO_CONFIGURATION_FAVORECIDOS = [
+    "Sion - Matriz",
     "Sion - Helexia PR",
     "Sion - Helexia MS",
 ]
@@ -702,8 +703,8 @@ def _configuration_headers_for_distributor(distributor: str) -> list[str]:
 
     headers.append(_RATEIO_CONFIGURATION_STATUS_HEADER)
 
-    special_defaults = _special_allocation_defaults_for_distributor(distributor_name)
-    if special_defaults:
+    special_defaults = _special_allocation_defaults_for_distributor(distributor_name) or {}
+    if special_defaults or distributor_name == "COPEL":
         headers.append(_RATEIO_CONFIGURATION_SPECIAL_BASE_HEADER)
         if str(special_defaults.get("remainder_uc") or "").strip():
             headers.append(_RATEIO_CONFIGURATION_REMAINDER_UC_HEADER)
@@ -5209,7 +5210,7 @@ def full_sync() -> None:
         )
         goals_by_target[target] = goals
 
-    for distributor in (name for name in TARGET_SHEET_TABS if name != "COPEL"):
+    for distributor in TARGET_SHEET_TABS:
         spreadsheet_id, _ = resolve_rateio_sheet_target(distributor)
         _run_sheets_step_with_retry(
             f"Layout Configuracao [{distributor}]",

@@ -314,7 +314,7 @@ Antes de escrever o rateio, o full sync confere as metas de geracao dos meses ne
 
 ## Aba Configuracao
 
-A aba `Configuracao` existe em cada planilha de distribuidora. O full sync preserva o layout da COPEL e padroniza AmE, Energisa MS e CELESC, conservando os valores manuais por nome de coluna e os meses fechados.
+A aba `Configuracao` existe em cada planilha de distribuidora. O full sync mantém os valores manuais e os meses fechados, preserva os campos próprios da COPEL e sincroniza a janela mensal de configuração, incluindo os meses de 2027 quando entram na janela do rateio.
 
 Cabecalhos possiveis:
 
@@ -322,12 +322,15 @@ Cabecalhos possiveis:
 | --- | --- |
 | `Alteracao Rateio para o mes` | Mes A que a configuracao controla. |
 | `Coeficiente <Favorecido>` | Coeficiente manual por favorecido. Formulas nao sao consideradas configuracao manual. |
+| `Coeficiente base especial` | Na COPEL, coeficiente base da Matriz quando `Coeficiente Sion - Matriz` estiver vazio ou contiver fórmula. |
 | `Status` | Se for `Fechado`, congela o mes. Qualquer outro valor, inclusive vazio ou desconhecido, e tratado como aberto. |
 | `Coeficiente Contingencia <Favorecido>` | Coeficiente das linhas em contingencia. |
 | `Coeficiente Baixa Tensao <Favorecido>` | Coeficiente manual para cooperados de baixa tensao. |
 | `Coeficiente Alta Tensao <Favorecido>` | Coeficiente manual para cooperados de alta tensao. |
 
-Nas distribuidoras fora da COPEL, a contingencia prevalece sobre a tensao. Para os demais cooperados, o coeficiente de tensao preenchido prevalece sobre o coeficiente geral do favorecido. Quando ha coeficiente manual aplicavel e UCs com `UC Ancora` marcada na ClickUp, o restante da geracao mensal define um coeficiente comum para as ancoras elegiveis da mesma distribuidora e favorecido de rateio, sem teto fixo para esse coeficiente. O Novo Rateio de cada ancora segue a mesma formula das demais UCs: `max(consumo projetado * coeficiente - saldo K, 0)`, arredondado para kWh inteiro; o coeficiente e ampliado ate distribuir a geracao disponivel sem ultrapassa-la. Na COPEL, `Sion - Helexia PR` pertence ao grupo de rateio de `Sion - Matriz` e pode servir de ancora desse grupo. O valor manual em `Coeficiente Sion - Matriz` prevalece; se a celula estiver vazia ou contiver formula, `Coeficiente base especial` numerico funciona como coeficiente base da Matriz. Sem coeficiente manual, segue o calculo automatico. Sem ancora elegivel, os coeficientes manuais continuam aplicados e a sobra fica sem destino; o log registra o caso. O checkbox fica visivel na coluna R da aba de rateio. Meses fechados nao sao recalculados.
+Nas distribuidoras fora da COPEL, a contingencia prevalece sobre a tensao. Para os demais cooperados, o coeficiente de tensao preenchido prevalece sobre o coeficiente geral do favorecido. Quando ha coeficiente manual aplicavel e UCs com `UC Ancora` marcada na ClickUp, o restante da geracao mensal define um coeficiente comum para as ancoras elegiveis da mesma distribuidora e favorecido de rateio, sem teto fixo para esse coeficiente. O Novo Rateio de cada ancora segue a mesma formula das demais UCs: `max(consumo projetado * coeficiente - saldo K, 0)`, arredondado para kWh inteiro; o coeficiente e ampliado ate distribuir a geracao disponivel sem ultrapassa-la.
+
+Na COPEL, `Sion - Helexia PR` pertence ao grupo de rateio de `Sion - Matriz` e pode servir de ancora desse grupo. O valor manual em `Coeficiente Sion - Matriz` prevalece; se a celula estiver vazia ou contiver formula, `Coeficiente base especial` numerico funciona como coeficiente base da Matriz. Sem coeficiente manual, segue o calculo automatico. A regra independente `Sobra para UC`, quando configurada, so e aplicada se nenhuma alocacao por ancora tiver sido aplicada. Sem ancora elegivel e sem regra de sobra para UC aplicavel, os coeficientes manuais continuam aplicados e a sobra fica sem destino; o log registra o caso. O checkbox fica visivel na coluna R da aba de rateio. Meses fechados nao sao recalculados.
 
 A tensao usa o campo `Produto` da ClickUp: a opcao `Cooperativa Grupo A` e alta tensao; as opcoes de Grupo B sao baixa tensao.
 
